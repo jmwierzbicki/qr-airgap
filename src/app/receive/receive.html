@@ -28,6 +28,14 @@
         <option value="wasm" [selected]="preferredEngine() === 'wasm'">ZXing WebAssembly (base64 i binarne)</option>
       </select>
     </label>
+    <label class="field">
+      <span>Kolor (3 kanały RGB)</span>
+      <select [value]="colorMode()" (change)="onColorMode($event)">
+        <option value="auto" [selected]="colorMode() === 'auto'">Automatycznie</option>
+        <option value="on" [selected]="colorMode() === 'on'">Zawsze dekoduj kanały</option>
+        <option value="off" [selected]="colorMode() === 'off'">Tylko czarno-biały</option>
+      </select>
+    </label>
     <div class="row buttons">
       @if (!running()) {
         <button type="button" class="primary" [disabled]="starting()" (click)="start()">
@@ -56,8 +64,8 @@
     <video #video playsinline muted autoplay></video>
     @if (running()) {
       <span class="badge">
-        {{ engine() === 'native' ? 'BarcodeDetector' : 'ZXing wasm' }} · {{ scanRate() | number: '1.0-0' }} kl/s ·
-        {{ codeRate() | number: '1.1-1' }} kodów/s
+        {{ engine() === 'native' ? 'BarcodeDetector' : 'ZXing wasm' }}{{ colorActive() ? ' · RGB' : '' }} ·
+        {{ scanRate() | number: '1.0-0' }} kl/s · {{ codeRate() | number: '1.1-1' }} kodów/s
       </span>
     }
   </div>
@@ -135,15 +143,20 @@
 @if (calibrationRows().length) {
   <section class="panel">
     <h2>Kalibracja</h2>
-    @if (calibrationCurrent()) {
+    @if (calibrationStalledSeconds(); as idle) {
+      <p class="hint notice">
+        Od {{ idle }} s nie dociera żaden kod: kolejne profile są za gęste dla tej kamery. Możesz zatrzymać nadajnik,
+        ranking poniżej jest już miarodajny.
+      </p>
+    } @else if (calibrationCurrent()) {
       <p class="hint">Odbieram profil: <strong>{{ calibrationCurrent() }}</strong>. Ranking aktualizuje się na bieżąco.</p>
     }
     @if (bestCalibration(); as best) {
       <div class="result">
         <h3>Najlepszy: {{ best.name }}</h3>
         <p>
-          {{ formatBytes(best.bytesPerSecond) }}/s · {{ best.profile.blockSize }} B × {{ best.profile.grid }} kod(y) ×
-          {{ best.profile.fps }} kl/s · {{ best.profile.binary ? 'binarny' : 'base64' }} · odebrano
+          {{ formatBytes(best.bytesPerSecond) }}/s · {{ best.profile.blockSize }} B × {{ best.profile.grid }} komórk(i)
+          {{ best.profile.color ? '× 3 kanały RGB' : '' }} × {{ best.profile.fps }} kl/s · odebrano
           {{ best.received }}/{{ best.sent }}
         </p>
         <button type="button" class="primary" (click)="copyName(best.name)">Kopiuj nazwę profilu</button>
@@ -155,8 +168,8 @@
           <th>Profil</th>
           <th>B/kod</th>
           <th>kl/s</th>
-          <th>kodów</th>
-          <th>kodowanie</th>
+          <th>komórek</th>
+          <th>kolor</th>
           <th>odebrano</th>
           <th>przepustowość</th>
         </tr>
@@ -168,7 +181,7 @@
             <td>{{ row.profile.blockSize }}</td>
             <td>{{ row.profile.fps }}</td>
             <td>{{ row.profile.grid }}</td>
-            <td>{{ row.profile.binary ? 'bin' : 'b64' }}</td>
+            <td>{{ row.profile.color ? 'RGB' : 'b/w' }}</td>
             <td>{{ row.received }}/{{ row.sent }} ({{ (row.received / row.sent) * 100 | number: '1.0-0' }}%)</td>
             <td>{{ formatBytes(row.bytesPerSecond) }}/s</td>
           </tr>

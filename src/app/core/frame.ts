@@ -11,7 +11,7 @@
  *   7  u32  blockCount  K, liczba bloków źródłowych
  *  11  u16  blockSize   rozmiar bloku w bajtach
  *  13  u32  dataLength  długość kontenera (po ewentualnej kompresji)
- *  17  u8   flags       bit0 = gzip, bit1 = ramka kalibracyjna
+ *  17  u8   flags       bit0 = gzip, bit1 = ramka kalibracyjna, bit2 = kod w kanale koloru
  *  18  u32  crc32       suma kontrolna kontenera
  *  22  u32  seed        numer kropli (seed generatora sąsiadów)
  *  26  ...  payload     blockSize bajtów (XOR wybranych bloków)
@@ -26,6 +26,8 @@ export const FRAME_VERSION = 1;
 export const HEADER_SIZE = 26;
 export const FLAG_GZIP = 0b01;
 export const FLAG_CALIBRATION = 0b10;
+/** Ramka pochodzi z transmisji kolorowej (3 kody w kanałach R, G, B jednej komórki). */
+export const FLAG_COLOR = 0b100;
 
 export interface FrameHeader {
   fileId: number;

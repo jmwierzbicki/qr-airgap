@@ -43,7 +43,7 @@
 
   <div class="profile-row">
     <label class="field grow">
-      <span>Nazwa profilu z kalibracji (np. {{ profileNames[13] }})</span>
+      <span>Nazwa profilu z kalibracji (np. {{ profileNames[13] }} albo {{ profileNames[40] }})</span>
       <input
         type="text"
         list="profile-names"
@@ -75,11 +75,18 @@
       <input type="range" min="2" max="20" step="1" [value]="fps()" (input)="onFps($event)" />
     </label>
     <label class="field">
-      <span>Kodów na klatkę</span>
+      <span>Komórek na klatkę</span>
       <select [value]="grid()" (change)="onGrid($event)">
         <option value="1" [selected]="grid() === 1">1</option>
         <option value="2" [selected]="grid() === 2">2 (obok siebie)</option>
         <option value="4" [selected]="grid() === 4">4 (siatka 2×2)</option>
+      </select>
+    </label>
+    <label class="field">
+      <span>Kolor</span>
+      <select [value]="color() ? 'rgb' : 'mono'" (change)="onColor($event)">
+        <option value="mono" [selected]="!color()">czarno-biały (1 kod na komórkę)</option>
+        <option value="rgb" [selected]="color()">RGB, 3 kody na komórkę (eksperyment)</option>
       </select>
     </label>
     <label class="field">
@@ -103,7 +110,7 @@
     Profil:
     <strong>{{ currentProfileName() ?? 'własny (bez nazwy)' }}</strong>.
     Przepustowość nominalna <strong>{{ formatBytes(throughput()) }}/s</strong>
-    ({{ codesPerSecond() }} kodów/s).
+    ({{ codesPerFrame() }} kod(y) na klatkę, {{ codesPerSecond() }} kodów/s).
     @if (blockCount()) {
       Pełny cykl {{ blockCount() }} kodów to ok. <strong>{{ cycleSeconds() | number: '1.0-1' }} s</strong>.
     }
@@ -118,10 +125,13 @@
   <div class="row">
     @if (!running()) {
       <button type="button" class="primary" [disabled]="!payload()" (click)="start()">Start</button>
-      <button type="button" (click)="startCalibration()" title="Przelatuje po {{ profileNames.length }} profilach, ok. {{ calibrationTotalSeconds }} s">
-        Kalibracja ({{ calibrationTotalSeconds }} s)
+      <button type="button" (click)="startCalibration('bw')" title="36 profili czarno-białych po 2 s">
+        Kalibracja ({{ calibrationSeconds.bw }} s)
       </button>
-      <button type="button" (click)="startColorTest()" title="Statyczna karta do pomiaru koloru na odbiorniku (eksperyment)">
+      <button type="button" (click)="startCalibration('color')" title="24 profile kolorowe po 2 s">
+        Kalibracja koloru ({{ calibrationSeconds.color }} s)
+      </button>
+      <button type="button" (click)="startColorTest()" title="Statyczna karta do pomiaru koloru na odbiorniku">
         Karta koloru
       </button>
     } @else {
@@ -139,7 +149,7 @@
     }
     @if (calibrating()) {
       <span class="status">
-        Kalibracja {{ calibrationIndex() + 1 }}/{{ profileNames.length }}:
+        Kalibracja {{ calibrationKind() === 'color' ? 'koloru ' : '' }}{{ calibrationPosition().current }}/{{ calibrationPosition().total }}:
         <strong>{{ calibrationProfileName() }}</strong> (QR v{{ qrVersion() }})
       </span>
     }

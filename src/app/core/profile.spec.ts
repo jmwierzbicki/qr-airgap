@@ -1,9 +1,12 @@
 import { utf8Decode } from './bytes';
 import { FLAG_CALIBRATION } from './frame';
 import {
+  CALIBRATION_BW_COUNT,
   CALIBRATION_PROFILES,
   calibrationCodes,
   calibrationPayload,
+  calibrationRange,
+  codesPerFrame,
   profileByName,
   profileIndex,
   profileName,
@@ -21,7 +24,12 @@ describe('profiles', () => {
       expect(profileByName(name!)).toEqual(p);
       expect(profileIndex(p)).toBe(i);
     });
-    expect(names.size).toBe(72);
+    expect(CALIBRATION_BW_COUNT).toBe(36);
+    expect(names.size).toBe(60);
+    expect(calibrationRange('bw')).toEqual([0, 36]);
+    expect(calibrationRange('color')).toEqual([36, 60]);
+    expect(CALIBRATION_PROFILES.slice(0, 36).every((p) => !p.color)).toBe(true);
+    expect(CALIBRATION_PROFILES.slice(36).every((p) => p.color)).toBe(true);
   });
 
   it('name lookup ignores case, spacing and diacritics', () => {
@@ -31,16 +39,23 @@ describe('profiles', () => {
     const ascii = name.normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/ł/g, 'l');
     expect(profileByName(ascii)).toEqual(p);
     expect(profileByName('Nieistniejący Smok')).toBeNull();
-    expect(profileName({ blockSize: 123, fps: 10, grid: 1, binary: false })).toBeNull();
+    expect(profileName({ blockSize: 123, fps: 10, grid: 1, binary: true, color: false })).toBeNull();
+    expect(profileName({ blockSize: 700, fps: 10, grid: 1, binary: false, color: false })).toBeNull();
+    expect(profileName({ blockSize: 700, fps: 10, grid: 4, binary: true, color: true })).toBeNull();
   });
 
-  it('calibration payload is deterministic and sized', () => {
+  it('calibration payload is deterministic and code counts include colour channels', () => {
     const a = calibrationPayload(3, 7, 400);
     const b = calibrationPayload(3, 7, 400);
     expect(a.length).toBe(400);
     expect(Array.from(a)).toEqual(Array.from(b));
     expect(Array.from(calibrationPayload(3, 8, 400))).not.toEqual(Array.from(a));
-    expect(calibrationCodes({ blockSize: 400, fps: 10, grid: 4, binary: true })).toBe(100);
+    const bw = { blockSize: 400, fps: 10, grid: 4 as const, binary: true, color: false };
+    const color = { ...bw, grid: 2 as const, color: true };
+    expect(codesPerFrame(bw)).toBe(4);
+    expect(codesPerFrame(color)).toBe(6);
+    expect(calibrationCodes(bw)).toBe(80);
+    expect(calibrationCodes(color)).toBe(120);
   });
 });
 

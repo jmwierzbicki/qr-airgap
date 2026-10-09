@@ -10,8 +10,15 @@ import {
 } from '@angular/core';
 import QRCode from 'qrcode';
 import { crc32, formatBytes, randomUint32, utf8Encode } from '../core/bytes';
+import {
+  COLOR_TEST_MODULES,
+  COLOR_TEST_QR_VERSION,
+  buildTestCard,
+  colorTestText,
+  paintTestCard,
+} from '../core/colortest';
 import { packContainer, type PackedContainer } from '../core/container';
-import { FLAG_CALIBRATION, HEADER_SIZE, type FrameHeader } from '../core/frame';
+import { FLAG_CALIBRATION, FLAG_COLOR, HEADER_SIZE, type FrameHeader } from '../core/frame';
 import { LtEncoder } from '../core/lt';
 import {
   CALIBRATION_MS,
@@ -21,19 +28,15 @@ import {
   calibrationCodes,
   calibrationDurationMs,
   calibrationPayload,
+  calibrationRange,
+  codesPerFrame,
   profileByName,
   profileName,
+  type CalibrationKind,
   type Grid,
   type Profile,
 } from '../core/profile';
 import { encodeWire } from '../core/wire';
-import {
-  COLOR_TEST_MODULES,
-  COLOR_TEST_QR_VERSION,
-  buildTestCard,
-  colorTestText,
-  paintTestCard,
-} from '../core/colortest';
 
 interface PreparedPayload {
   name: string;
@@ -67,7 +70,10 @@ export class Send implements OnDestroy {
   readonly blockPresets = BLOCK_PRESETS;
   readonly formatBytes = formatBytes;
   readonly profileNames = CALIBRATION_PROFILES.map((p) => profileName(p)!);
-  readonly calibrationTotalSeconds = Math.round(calibrationDurationMs() / 1000);
+  readonly calibrationSeconds = {
+    bw: Math.round(calibrationDurationMs('bw') / 1000),
+    color: Math.round(calibrationDurationMs('color') / 1000),
+  };
 
   readonly text = signal('');
   readonly payload = signal<PreparedPayload | null>(null);
@@ -76,6 +82,7 @@ export class Send implements OnDestroy {
   readonly ecLevel = signal<EcLevel>('L');
   readonly running = signal(false);
   readonly calibrating = signal(false);
+  readonly calibrationKind = signal<CalibrationKind>('bw');
   readonly colorTesting = signal(false);
   readonly calibrationIndex = signal(0);
   readonly framesSent = signal(0);
@@ -88,6 +95,7 @@ export class Send implements OnDestroy {
   readonly fps = computed(() => this.profile().fps);
   readonly grid = computed(() => this.profile().grid);
   readonly binary = computed(() => this.profile().binary);
+  readonly color = computed(() => this.profile().color);
   readonly currentProfileName = computed(() => profileName(this.profile()));
 
   /** Dla małych wiadomości blok kurczy się do rozmiaru danych, żeby kod QR był jak najrzadszy. */
@@ -101,7 +109,8 @@ export class Send implements OnDestroy {
     return p ? Math.max(1, Math.ceil(p.packed.bytes.length / this.effectiveBlockSize())) : 0;
   });
   readonly frameBytes = computed(() => HEADER_SIZE + this.effectiveBlockSize());
-  readonly codesPerSecond = computed(() => this.fps() * this.grid());
+  readonly codesPerFrame = computed(() => codesPerFrame(this.profile()));
+  readonly codesPerSecond = computed(() => this.fps() * this.codesPerFrame());
   readonly cycleSeconds = computed(() => this.blockCount() / this.codesPerSecond());
   readonly cycleProgress = computed(() => {
     const k = this.blockCount();
@@ -111,9 +120,14 @@ export class Send implements OnDestroy {
   readonly calibrationProfileName = computed(
     () => profileName(CALIBRATION_PROFILES[this.calibrationIndex()]) ?? '',
   );
-  readonly calibrationProgress = computed(
-    () => (this.calibrationIndex() / CALIBRATION_PROFILES.length) * 100,
-  );
+  readonly calibrationPosition = computed(() => {
+    const [from, to] = calibrationRange(this.calibrationKind());
+    return { current: this.calibrationIndex() - from + 1, total: to - from };
+  });
+  readonly calibrationProgress = computed(() => {
+    const { current, total } = this.calibrationPosition();
+    return ((current - 1) / total) * 100;
+  });
 
   private readonly canvasRef = viewChild<ElementRef<HTMLCanvasElement>>('canvas');
   private readonly stageRef = viewChild<ElementRef<HTMLElement>>('stage');
@@ -171,7 +185,8 @@ export class Send implements OnDestroy {
     }
     this.error.set('');
     this.notice.set(
-      `Profil ${profileName(found)}: ${found.blockSize} B, ${found.fps} kl/s, ${found.grid} kod(y) na klatkę, ${found.binary ? 'binarny' : 'base64'}.`,
+      `Profil ${profileName(found)}: ${found.blockSize} B, ${found.fps} kl/s, ${found.grid} komórk(i), ` +
+        `${found.color ? 'kolor RGB, ' : ''}${found.binary ? 'binarny' : 'base64'}.`,
     );
     this.updateProfile(found);
   }
@@ -190,6 +205,10 @@ export class Send implements OnDestroy {
 
   onBinary(event: Event): void {
     this.updateProfile({ ...this.profile(), binary: (event.target as HTMLSelectElement).value === 'binary' });
+  }
+
+  onColor(event: Event): void {
+    this.updateProfile({ ...this.profile(), color: (event.target as HTMLSelectElement).value === 'rgb' });
   }
 
   onEcLevel(event: Event): void {
@@ -218,7 +237,7 @@ export class Send implements OnDestroy {
       blockCount: this.encoder.blockCount,
       blockSize,
       dataLength: payload.packed.bytes.length,
-      flags: payload.packed.flags,
+      flags: payload.packed.flags | (this.color() ? FLAG_COLOR : 0),
       crc: crc32(payload.packed.bytes),
       seed: 0,
     };
@@ -232,16 +251,18 @@ export class Send implements OnDestroy {
     this.scheduleTimer(this.fps());
   }
 
-  startCalibration(): void {
+  startCalibration(kind: CalibrationKind): void {
     this.stop();
     this.error.set('');
     this.notice.set('');
-    this.calibrationIndex.set(0);
+    this.calibrationKind.set(kind);
+    const [from] = calibrationRange(kind);
+    this.calibrationIndex.set(from);
     this.framesSent.set(0);
     this.calibrating.set(true);
     this.running.set(true);
     this.observeStage();
-    this.enterCalibrationProfile(0);
+    this.enterCalibrationProfile(from);
   }
 
   /** Statyczna karta testowa do pomiaru koloru po stronie odbiornika. */
@@ -345,24 +366,25 @@ export class Send implements OnDestroy {
   private renderTransferFrame(canvas: HTMLCanvasElement): void {
     if (!this.encoder || !this.header) return;
     const wires: Uint8Array[] = [];
-    for (let i = 0; i < this.grid(); i++) {
+    for (let i = 0; i < this.codesPerFrame(); i++) {
       const seed = this.seed;
       this.seed = (this.seed + 1) >>> 0;
       wires.push(
         encodeWire({ header: { ...this.header, seed }, payload: this.encoder.droplet(seed) }, this.binary()),
       );
     }
-    this.drawCodes(canvas, wires);
+    this.drawCodes(canvas, wires, this.color());
     this.framesSent.update((n) => n + wires.length);
   }
 
   private renderCalibrationFrame(canvas: HTMLCanvasElement): void {
     const idx = this.calibrationIndex();
+    const [, end] = calibrationRange(this.calibrationKind());
     const profile = CALIBRATION_PROFILES[idx];
     const total = calibrationCodes(profile);
     const elapsed = performance.now() - this.calibrationStartedAt;
     if (elapsed >= CALIBRATION_MS || this.calibrationCodeIndex >= total) {
-      if (idx + 1 >= CALIBRATION_PROFILES.length) {
+      if (idx + 1 >= end) {
         this.stop();
         this.notice.set(
           'Kalibracja zakończona. Odczytaj ranking na odbiorniku i wpisz nazwę najlepszego profilu powyżej.',
@@ -374,14 +396,15 @@ export class Send implements OnDestroy {
       return;
     }
     const wires: Uint8Array[] = [];
-    for (let i = 0; i < profile.grid && this.calibrationCodeIndex < total; i++) {
+    const perFrame = codesPerFrame(profile);
+    for (let i = 0; i < perFrame && this.calibrationCodeIndex < total; i++) {
       const seed = this.calibrationCodeIndex++;
       const header: FrameHeader = {
         fileId: idx,
         blockCount: total,
         blockSize: profile.blockSize,
         dataLength: CALIBRATION_TABLE_VERSION,
-        flags: FLAG_CALIBRATION,
+        flags: FLAG_CALIBRATION | (profile.color ? FLAG_COLOR : 0),
         crc: 0,
         seed,
       };
@@ -389,7 +412,7 @@ export class Send implements OnDestroy {
         encodeWire({ header, payload: calibrationPayload(idx, seed, profile.blockSize) }, profile.binary),
       );
     }
-    this.drawCodes(canvas, wires);
+    this.drawCodes(canvas, wires, profile.color);
     this.framesSent.update((n) => n + wires.length);
   }
 
@@ -399,14 +422,8 @@ export class Send implements OnDestroy {
     this.calibrationCodeIndex = 0;
     if (!this.prepareLayout(profile.blockSize, profile.grid, profile.binary)) return;
     this.scheduleTimer(profile.fps);
-    // Pierwsza klatka profilu od razu, bez czekania na pierwszy tik timera.
-    this.busy = false;
-    this.renderCalibrationFrameSafe();
-  }
-
-  private renderCalibrationFrameSafe(): void {
     const canvas = this.canvasRef()?.nativeElement;
-    if (!canvas || !this.layout) return;
+    if (!canvas) return;
     try {
       this.renderCalibrationFrame(canvas);
     } catch (err) {
@@ -415,8 +432,12 @@ export class Send implements OnDestroy {
     }
   }
 
-  /** Rysuje jeden lub kilka kodów QR na wspólnym płótnie, ostrymi modułami o całkowitej skali. */
-  private drawCodes(canvas: HTMLCanvasElement, wires: Uint8Array[]): void {
+  /**
+   * Rysuje kody na wspólnym płótnie ostrymi modułami o całkowitej skali.
+   * W trybie kolorowym każda komórka dostaje trzy kolejne kody: kanał R, G i B.
+   * Wzorce pozycjonujące są wspólne, więc pozostają czarno-białe.
+   */
+  private drawCodes(canvas: HTMLCanvasElement, wires: Uint8Array[], color: boolean): void {
     const layout = this.layout!;
     const cellModules = layout.modules + 2 * layout.margin;
     const cellPx = cellModules * layout.scale;
@@ -438,28 +459,42 @@ export class Send implements OnDestroy {
     }
     const sctx = this.scratch.getContext('2d')!;
     const image = sctx.createImageData(size, size);
+    const px = image.data;
+    const perCell = color ? 3 : 1;
+    const cells = Math.ceil(wires.length / perCell);
 
-    wires.forEach((wire, i) => {
-      const code = QRCode.create([{ mode: 'byte', data: wire }], {
-        errorCorrectionLevel: this.ecLevel(),
-        version: layout.version,
-      });
-      const data = code.modules.data;
-      const px = image.data;
-      for (let m = 0; m < size * size; m++) {
-        const v = data[m] ? 0 : 255;
-        px[m * 4] = v;
-        px[m * 4 + 1] = v;
-        px[m * 4 + 2] = v;
-        px[m * 4 + 3] = 255;
+    for (let cell = 0; cell < cells; cell++) {
+      px.fill(255);
+      for (let ch = 0; ch < perCell; ch++) {
+        const wire = wires[cell * perCell + ch];
+        if (!wire) break;
+        const code = QRCode.create([{ mode: 'byte', data: wire }], {
+          errorCorrectionLevel: this.ecLevel(),
+          version: layout.version,
+        });
+        const data = code.modules.data;
+        if (color) {
+          // Moduł ciemny w kodzie kanału ch gasi tylko ten kanał.
+          for (let m = 0; m < size * size; m++) {
+            if (data[m]) px[m * 4 + ch] = 0;
+          }
+        } else {
+          for (let m = 0; m < size * size; m++) {
+            if (data[m]) {
+              px[m * 4] = 0;
+              px[m * 4 + 1] = 0;
+              px[m * 4 + 2] = 0;
+            }
+          }
+        }
       }
       sctx.putImageData(image, 0, 0);
-      const col = i % layout.cols;
-      const row = Math.floor(i / layout.cols);
+      const col = cell % layout.cols;
+      const row = Math.floor(cell / layout.cols);
       const x = col * cellPx + layout.margin * layout.scale;
       const y = row * cellPx + layout.margin * layout.scale;
       ctx.drawImage(this.scratch, x, y, size * layout.scale, size * layout.scale);
-    });
+    }
   }
 
   /** Dobiera całkowitą skalę modułu tak, aby cała siatka mieściła się na scenie. */
@@ -526,8 +561,8 @@ export class Send implements OnDestroy {
     }
 
     paintTestCard(card, {
-      fillRect: (x, y, w, h, color) => {
-        ctx.fillStyle = `rgb(${color.r},${color.g},${color.b})`;
+      fillRect: (x, y, w, h, c) => {
+        ctx.fillStyle = `rgb(${c.r},${c.g},${c.b})`;
         ctx.fillRect((quiet + x) * scale, (quiet + y) * scale, w * scale, h * scale);
       },
     });
@@ -547,7 +582,7 @@ function loadProfile(): Profile {
       (p.grid === 1 || p.grid === 2 || p.grid === 4) &&
       typeof p.binary === 'boolean'
     ) {
-      return { blockSize: p.blockSize, fps: p.fps, grid: p.grid, binary: p.binary };
+      return { blockSize: p.blockSize, fps: p.fps, grid: p.grid, binary: p.binary, color: p.color === true };
     }
   } catch {
     /* brak localStorage albo uszkodzony zapis */

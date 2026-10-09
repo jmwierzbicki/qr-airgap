@@ -19,15 +19,19 @@ skopiować katalog `dist/qr-airgap/browser` i podać go lokalnym serwerem, np. `
 
 ## Profile i kalibracja
 
-Parametry transmisji są zebrane w **profil**: bajtów na kod, klatek na sekundę, kodów na klatkę (1, 2 lub 4)
-i kodowanie (base64 albo binarne). 72 kombinacje z tabeli kalibracyjnej mają czytelne nazwy
-"Przymiotnik Zwierzę": zwierzę koduje siatkę i rozmiar bloku, przymiotnik koduje fps i kodowanie
-(np. *Zwinny Wilk* = 2 kody × 700 B, 10 kl/s, binarnie).
+Parametry transmisji są zebrane w **profil**: bajtów na kod, klatek na sekundę, komórek na klatkę (1, 2 lub 4),
+kolor (czarno-biały albo 3 kody RGB w komórce) i kodowanie (base64 albo binarne). 60 profili z tabeli
+kalibracyjnej ma czytelne nazwy "Przymiotnik Zwierzę": zwierzę koduje siatkę i rozmiar bloku, przymiotnik
+koduje fps i rodzaj (*Spokojny/Żwawy/Szybki* = czarno-biały 6/10/15 kl/s, *Tęczowy/Barwny/Jaskrawy* = RGB),
+np. *Żwawy Wilk* = 2 kody × 700 B, 10 kl/s, a *Barwny Bóbr* = 1 komórka × 3 kanały × 700 B, 10 kl/s.
 
 Kanał jest jednokierunkowy, więc kalibracja działa "na ślepo":
 
-1. Odbiornik: *Start kamery*. Nadajnik: *Kalibracja* (ok. 3 min). Nadajnik przelatuje po wszystkich
-   profilach, każdy przez 2,5 s, nadając nieściśliwe ramki testowe.
+1. Odbiornik: *Start kamery*. Nadajnik: *Kalibracja* (36 profili czarno-białych, ok. 72 s) albo
+   *Kalibracja koloru* (24 profile RGB, ok. 48 s). Nadajnik przelatuje po profilach od najłatwiejszych do
+   najgęstszych, każdy przez 2 s, nadając nieściśliwe ramki testowe. Kalibruje się tylko w trybie binarnym
+   (odbiornik sam przełącza się na ZXing); base64 to ta sama fizyka przy innej gęstości kodu.
+   Gdy przez kilka sekund nic nie dociera, odbiornik podpowiada, że można przerwać.
 2. Odbiornik zlicza, ile unikatowych kodów z każdego profilu dotarło, i na bieżąco pokazuje ranking
    wg realnej przepustowości (bajty odebrane / czas profilu). Najlepszy profil jest wyróżniony.
 3. Na nadajniku wpisz nazwę zwycięskiego profilu w polu *Nazwa profilu* (wielkość liter i polskie znaki
@@ -113,9 +117,13 @@ Zamiast zgadywać, aplikacja ma **pomiar** (nadajnik: *Karta koloru*, odbiornik:
   szybciej niż luminancji, tor podpróbkowuje kolor i wiadomo, o ile większe muszą być moduły;
 - *Kopiuj wynik (JSON)* daje surowe liczby do dalszej analizy.
 
-Decyzja o wdrożeniu kodowania kolorowego (najprościej: 3 kody w kanałach z dekodowaniem per kanał przez ZXing
-po normalizacji) zapada po pomiarze na docelowym sprzęcie. Na tej podstawie wiadomo, czy realny zysk to
-3×, 1,5× czy nic.
+**Tryb kolorowy (eksperyment)** jest już w aplikacji: w każdej komórce trzy kody QR, po jednym w kanale R, G
+i B (moduł ciemny w kodzie kanału gasi tylko ten kanał). Wzorce pozycjonujące są wspólne, więc zostają
+czarno-białe. Odbiornik rozdziela klatkę na kanały i dekoduje każdy jako obraz w skali szarości; lokalna
+binaryzacja ZXing radzi sobie z umiarkowanym przenikaniem bez jawnej korekcji macierzą. Ramki kolorowe mają
+flagę w nagłówku, po której odbiornik w trybie *Automatycznie* przełącza się na dekodowanie kanałów (dekoder
+czarno-biały widzi z kompozytu tylko kanał G, bo zieleń dominuje w luminancji). Czy to daje 3×, 1,5× czy nic,
+rozstrzyga *Kalibracja koloru* i pomiar kartą na docelowym sprzęcie.
 
 Źródła: [libcimbar ABOUT](https://github.com/sz3/cimbar/blob/master/ABOUT.md),
 [JAB Code / ISO/IEC 23634](https://en.wikipedia.org/wiki/JAB_Code),

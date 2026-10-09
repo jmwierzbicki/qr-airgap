@@ -10,8 +10,15 @@ import {
   viewChild,
 } from '@angular/core';
 import { crc32, formatBytes, utf8Decode } from '../core/bytes';
+import {
+  analyzeColorTest,
+  buildTestCard,
+  parseColorTestModules,
+  type ColorTestResult,
+  type Corners,
+} from '../core/colortest';
 import { unpackContainer } from '../core/container';
-import { FLAG_CALIBRATION, sameTransfer, type FrameHeader } from '../core/frame';
+import { FLAG_CALIBRATION, FLAG_COLOR, sameTransfer, type FrameHeader } from '../core/frame';
 import { LtDecoder } from '../core/lt';
 import {
   CALIBRATION_MS,
@@ -22,13 +29,6 @@ import {
   type Profile,
 } from '../core/profile';
 import { decodeWire, looksLikeBinaryFrame, type ScanHit } from '../core/wire';
-import {
-  analyzeColorTest,
-  buildTestCard,
-  parseColorTestModules,
-  type ColorTestResult,
-  type Corners,
-} from '../core/colortest';
 import { createQrScanner, type QrScanner, type ScanEngine } from '../scan/qr-scanner';
 
 interface ScanStats {
@@ -62,12 +62,18 @@ export interface CalibrationRow {
   bytesPerSecond: number;
 }
 
+type ColorMode = 'auto' | 'on' | 'off';
+
 const TEXT_EXTENSIONS = /\.(txt|md|lua|json|js|ts|py|csv|xml|html|css|yml|yaml|ini|cfg|log|sh|bat)$/i;
 const RESOLUTIONS = [
   { width: 1280, height: 720, label: '720p (szybki dekoder)' },
   { width: 1920, height: 1080, label: '1080p (zalecane)' },
   { width: 3840, height: 2160, label: '4K (gęste kody, wolniej)' },
 ];
+/** Co ile klatek bez odczytu próbować dekodowania kolorowego w trybie auto. */
+const COLOR_PROBE_EVERY = 3;
+/** Po ilu kolorowych klatkach bez odczytu wrócić do trybu czarno-białego. */
+const COLOR_IDLE_FRAMES = 40;
 
 @Component({
   selector: 'app-receive',
@@ -82,14 +88,6 @@ export class Receive implements OnInit, OnDestroy {
   readonly channelNames = ['R', 'G', 'B'];
   readonly stripeWidths = [1, 2, 3, 4];
 
-  stripeContrast(result: ColorTestResult, kind: 'luma' | 'chroma', width: number): number {
-    return result.stripes.find((s) => s.kind === kind && s.width === width)?.contrast ?? 0;
-  }
-
-  rgbCss(c: { r: number; g: number; b: number }): string {
-    return `rgb(${Math.round(c.r)},${Math.round(c.g)},${Math.round(c.b)})`;
-  }
-
   readonly cameras = signal<MediaDeviceInfo[]>([]);
   readonly selectedCamera = signal('');
   readonly resolution = signal(1920);
@@ -97,6 +95,8 @@ export class Receive implements OnInit, OnDestroy {
   readonly starting = signal(false);
   readonly engine = signal<ScanEngine | ''>('');
   readonly preferredEngine = signal<ScanEngine | 'auto'>('auto');
+  readonly colorMode = signal<ColorMode>('auto');
+  readonly colorActive = signal(false);
   readonly error = signal('');
   readonly notice = signal('');
   readonly stats = signal<ScanStats>({ frames: 0, codes: 0, useful: 0, duplicates: 0, invalid: 0 });
@@ -107,6 +107,7 @@ export class Receive implements OnInit, OnDestroy {
   readonly lastCodeAt = signal(0);
   readonly calibrationRows = signal<CalibrationRow[]>([]);
   readonly calibrationCurrent = signal('');
+  readonly lastCalibrationAt = signal(0);
   readonly colorTesting = signal(false);
   readonly colorResult = signal<ColorTestResult | null>(null);
   readonly colorError = signal('');
@@ -125,6 +126,14 @@ export class Receive implements OnInit, OnDestroy {
     return Math.max(0, (t.blockCount - this.decoded()) / rate);
   });
   readonly bestCalibration = computed(() => this.calibrationRows()[0] ?? null);
+  /** Kalibracja trwała, ale od dłuższej chwili nic nie dociera: kolejne profile są za gęste. */
+  readonly calibrationStalledSeconds = computed(() => {
+    this.elapsed();
+    const last = this.lastCalibrationAt();
+    if (!last || !this.running()) return 0;
+    const idle = (performance.now() - last) / 1000;
+    return idle > (3 * CALIBRATION_MS) / 1000 ? Math.round(idle) : 0;
+  });
 
   private readonly videoRef = viewChild<ElementRef<HTMLVideoElement>>('video');
   private readonly gridRef = viewChild<ElementRef<HTMLCanvasElement>>('grid');
@@ -140,6 +149,8 @@ export class Receive implements OnInit, OnDestroy {
   private calibrationDirty = false;
   private readonly colorCanvas = document.createElement('canvas');
   private readonly colorCard = buildTestCard();
+  private frameCounter = 0;
+  private colorIdle = 0;
 
   async ngOnInit(): Promise<void> {
     await this.refreshCameras();
@@ -163,6 +174,13 @@ export class Receive implements OnInit, OnDestroy {
   onResolution(event: Event): void {
     this.resolution.set(Number((event.target as HTMLSelectElement).value));
     if (this.running()) void this.start();
+  }
+
+  onColorMode(event: Event): void {
+    const mode = (event.target as HTMLSelectElement).value as ColorMode;
+    this.colorMode.set(mode);
+    this.colorActive.set(mode === 'on');
+    this.colorIdle = 0;
   }
 
   async start(): Promise<void> {
@@ -230,7 +248,10 @@ export class Receive implements OnInit, OnDestroy {
     this.calibration.clear();
     this.calibrationRows.set([]);
     this.calibrationCurrent.set('');
+    this.lastCalibrationAt.set(0);
     this.notice.set('');
+    this.colorActive.set(this.colorMode() === 'on');
+    this.colorIdle = 0;
     this.drawGrid();
   }
 
@@ -244,6 +265,14 @@ export class Receive implements OnInit, OnDestroy {
     this.colorResult.set(null);
     this.colorError.set('');
     this.colorSamples.set(0);
+  }
+
+  stripeContrast(result: ColorTestResult, kind: 'luma' | 'chroma', width: number): number {
+    return result.stripes.find((s) => s.kind === kind && s.width === width)?.contrast ?? 0;
+  }
+
+  rgbCss(c: { r: number; g: number; b: number }): string {
+    return `rgb(${Math.round(c.r)},${Math.round(c.g)},${Math.round(c.b)})`;
   }
 
   async copyColorResult(): Promise<void> {
@@ -287,17 +316,63 @@ export class Receive implements OnInit, OnDestroy {
         await new Promise((r) => setTimeout(r, 150));
         continue;
       }
-      let hits: ScanHit[] = [];
-      try {
-        hits = await this.scanner.scan(video);
-      } catch (err) {
-        this.error.set(this.describeError(err));
-      }
+      const hits = await this.scanFrame(video, this.scanner);
       if (token !== this.loopToken) return;
       this.stats.update((s) => ({ ...s, frames: s.frames + 1 }));
       for (const hit of hits) this.handleHit(hit);
       // setTimeout zamiast requestAnimationFrame: rAF zamiera w karcie w tle i przy ukrytym oknie.
       await new Promise((r) => setTimeout(r, 15));
+    }
+  }
+
+  /**
+   * Jedna klatka: czarno-biało albo w kanałach RGB. W trybie auto przełącza się na
+   * kanały, gdy odczytana ramka ma flagę koloru (dekoder czarno-biały widzi z
+   * kompozytu tylko kanał G, bo zieleń dominuje w luminancji), a wraca, gdy
+   * kanały przez dłuższy czas nic nie dają albo trafi się ramka bez tej flagi.
+   */
+  private async scanFrame(video: HTMLVideoElement, scanner: QrScanner): Promise<ScanHit[]> {
+    this.frameCounter++;
+    const mode = this.colorMode();
+    try {
+      if (mode === 'on' || (mode === 'auto' && this.colorActive())) {
+        const hits = await scanner.scanColor(video);
+        if (mode === 'auto') {
+          const frames = hits.map((h) => decodeWire(h)).filter((f) => f !== null);
+          this.colorIdle = frames.length ? 0 : this.colorIdle + 1;
+          if (this.colorIdle > COLOR_IDLE_FRAMES || frames.some((f) => !(f.header.flags & FLAG_COLOR))) {
+            this.colorActive.set(false);
+            this.colorIdle = 0;
+          }
+        }
+        return hits;
+      }
+      const hits = await scanner.scan(video);
+      if (mode === 'auto') {
+        const colorFlagged = hits.some((h) => {
+          const f = decodeWire(h);
+          return f !== null && (f.header.flags & FLAG_COLOR) !== 0;
+        });
+        if (colorFlagged) {
+          this.colorActive.set(true);
+          this.colorIdle = 0;
+          this.notice.set('Wykryto transmisję kolorową (3 kanały RGB).');
+          return scanner.scanColor(video);
+        }
+        if (hits.length === 0 && this.frameCounter % COLOR_PROBE_EVERY === 0) {
+          const colorHits = await scanner.scanColor(video);
+          if (colorHits.some((h) => decodeWire(h) !== null)) {
+            this.colorActive.set(true);
+            this.colorIdle = 0;
+            this.notice.set('Wykryto transmisję kolorową (3 kanały RGB).');
+            return colorHits;
+          }
+        }
+      }
+      return hits;
+    } catch (err) {
+      this.error.set(this.describeError(err));
+      return [];
     }
   }
 
@@ -397,6 +472,7 @@ export class Receive implements OnInit, OnDestroy {
     }
     entry.seen.add(header.seed);
     entry.lastAt = now;
+    this.lastCalibrationAt.set(now);
     this.calibrationCurrent.set(profileName(profile) ?? '');
     if (!this.calibrationDirty) {
       this.calibrationDirty = true;

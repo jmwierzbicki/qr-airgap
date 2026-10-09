@@ -15,6 +15,8 @@ export interface ScanHit {
   bytes?: Uint8Array;
   /** Narożniki symbolu w pikselach obrazu: TL, TR, BR, BL (orientacja symbolu). */
   corners?: { x: number; y: number }[];
+  /** Kanał koloru, z którego pochodzi odczyt (0 = R, 1 = G, 2 = B); brak = skala szarości. */
+  channel?: number;
 }
 
 export function encodeWire(frame: Frame, binary: boolean): Uint8Array {
