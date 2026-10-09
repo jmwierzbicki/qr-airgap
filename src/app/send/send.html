@@ -39,11 +39,70 @@
 </section>
 
 <section class="panel">
-  <h2>2. Profil transmisji</h2>
+  <h2>2. Parametry</h2>
+
+  <div class="sliders">
+    <label class="field">
+      <span>Bajtów na kod: <strong>{{ blockSize() }} B</strong></span>
+      <input type="range" min="100" max="2000" step="50" [value]="blockSize()" (input)="onBlockSize($event)" />
+    </label>
+    <label class="field">
+      <span>Klatek na sekundę: <strong>{{ fps() }}</strong></span>
+      <input type="range" min="2" max="20" step="1" [value]="fps()" (input)="onFps($event)" />
+    </label>
+    <label class="field">
+      <span>Komórek na klatkę: <strong>{{ grid() }}</strong></span>
+      <input type="range" min="0" max="2" step="1" [value]="gridIndex()" (input)="onGrid($event)" />
+    </label>
+    <div class="toggles">
+      <label class="check">
+        <input type="checkbox" [checked]="binary()" (change)="onBinary($event)" />
+        kodowanie binarne (+33%, wymaga ZXing)
+      </label>
+      <label class="check">
+        <input type="checkbox" [checked]="color()" (change)="onColor($event)" />
+        kolor RGB, 3 kody na komórkę (eksperyment)
+      </label>
+      <label class="check">
+        korekcja QR
+        <select [value]="ecLevel()" (change)="onEcLevel($event)">
+          <option value="L" [selected]="ecLevel() === 'L'">L (7%)</option>
+          <option value="M" [selected]="ecLevel() === 'M'">M (15%)</option>
+          <option value="Q" [selected]="ecLevel() === 'Q'">Q (25%)</option>
+        </select>
+      </label>
+    </div>
+  </div>
+
+  <div class="speed">
+    <div>
+      <span class="label">nominalnie</span>
+      <strong>{{ formatBytes(nominal()) }}/s</strong>
+      <small>{{ codesPerFrame() }} kod(y) × {{ fps() }} kl/s</small>
+    </div>
+    @if (tuning()) {
+      <div [class.muted]="receiverRateFresh() === null">
+        <span class="label">odbiornik zgłasza</span>
+        @if (receiverRateFresh(); as rate) {
+          <strong>{{ formatBytes(rate) }}/s</strong>
+        } @else {
+          <strong>—</strong>
+          <small>{{ listening() ? 'czekam na raport' : 'włącz nasłuch poniżej' }}</small>
+        }
+      </div>
+    }
+    <div>
+      <span class="label">profil</span>
+      <strong>{{ currentProfileLabel() }}</strong>
+      @if (blockCount()) {
+        <small>cykl {{ blockCount() }} kodów ≈ {{ cycleSeconds() | number: '1.0-1' }} s</small>
+      }
+    </div>
+  </div>
 
   <div class="profile-row">
     <label class="field grow">
-      <span>Nazwa profilu z kalibracji (np. {{ profileNames[13] }} albo {{ profileNames[40] }})</span>
+      <span>Albo nazwa z rankingu (np. {{ profileNames[13] }})</span>
       <input
         type="text"
         list="profile-names"
@@ -60,61 +119,6 @@
     </label>
     <button type="button" (click)="applyProfileName()">Zastosuj</button>
   </div>
-
-  <div class="controls">
-    <label class="field">
-      <span>Bajtów na kod</span>
-      <select [value]="blockSize()" (change)="onBlockSize($event)">
-        @for (size of blockPresets; track size) {
-          <option [value]="size" [selected]="size === blockSize()">{{ size }} B</option>
-        }
-      </select>
-    </label>
-    <label class="field">
-      <span>Klatek na sekundę: {{ fps() }}</span>
-      <input type="range" min="2" max="20" step="1" [value]="fps()" (input)="onFps($event)" />
-    </label>
-    <label class="field">
-      <span>Komórek na klatkę</span>
-      <select [value]="grid()" (change)="onGrid($event)">
-        <option value="1" [selected]="grid() === 1">1</option>
-        <option value="2" [selected]="grid() === 2">2 (obok siebie)</option>
-        <option value="4" [selected]="grid() === 4">4 (siatka 2×2)</option>
-      </select>
-    </label>
-    <label class="field">
-      <span>Kolor</span>
-      <select [value]="color() ? 'rgb' : 'mono'" (change)="onColor($event)">
-        <option value="mono" [selected]="!color()">czarno-biały (1 kod na komórkę)</option>
-        <option value="rgb" [selected]="color()">RGB, 3 kody na komórkę (eksperyment)</option>
-      </select>
-    </label>
-    <label class="field">
-      <span>Kodowanie</span>
-      <select [value]="binary() ? 'binary' : 'base64'" (change)="onBinary($event)">
-        <option value="base64" [selected]="!binary()">base64 (każdy skaner)</option>
-        <option value="binary" [selected]="binary()">binarne, +33% (tylko ZXing)</option>
-      </select>
-    </label>
-    <label class="field">
-      <span>Korekcja błędów QR</span>
-      <select [value]="ecLevel()" (change)="onEcLevel($event)">
-        <option value="L" [selected]="ecLevel() === 'L'">L (7%, najwięcej danych)</option>
-        <option value="M" [selected]="ecLevel() === 'M'">M (15%)</option>
-        <option value="Q" [selected]="ecLevel() === 'Q'">Q (25%, trudne warunki)</option>
-      </select>
-    </label>
-  </div>
-
-  <p class="hint">
-    Profil:
-    <strong>{{ currentProfileName() ?? 'własny (bez nazwy)' }}</strong>.
-    Przepustowość nominalna <strong>{{ formatBytes(throughput()) }}/s</strong>
-    ({{ codesPerFrame() }} kod(y) na klatkę, {{ codesPerSecond() }} kodów/s).
-    @if (blockCount()) {
-      Pełny cykl {{ blockCount() }} kodów to ok. <strong>{{ cycleSeconds() | number: '1.0-1' }} s</strong>.
-    }
-  </p>
   @if (notice()) {
     <p class="hint notice">{{ notice() }}</p>
   }
@@ -125,23 +129,28 @@
   <div class="row">
     @if (!running()) {
       <button type="button" class="primary" [disabled]="!payload()" (click)="start()">Start</button>
-      <button type="button" (click)="startCalibration('bw')" title="36 profili czarno-białych po 2 s">
-        Kalibracja ({{ calibrationSeconds.bw }} s)
+      <button type="button" (click)="startTuning()" title="Ramki testowe z bieżącymi parametrami; suwaki działają na żywo, odbiornik pokazuje prędkość i ranking">
+        Strojenie na żywo
       </button>
-      <button type="button" (click)="startCalibration('color')" title="24 profile kolorowe po 2 s">
-        Kalibracja koloru ({{ calibrationSeconds.color }} s)
-      </button>
-      <button type="button" (click)="startColorTest()" title="Statyczna karta do pomiaru koloru na odbiorniku">
-        Karta koloru
-      </button>
+      <details class="more">
+        <summary>więcej</summary>
+        <div class="row">
+          <button type="button" (click)="startCalibration('bw')">Auto-przebieg b/w ({{ calibrationSeconds.bw }} s)</button>
+          <button type="button" (click)="startCalibration('color')">Auto-przebieg kolor ({{ calibrationSeconds.color }} s)</button>
+          <button type="button" (click)="startColorTest()">Karta koloru</button>
+        </div>
+      </details>
     } @else {
       <button type="button" class="danger" (click)="stop()">Stop</button>
     }
     <button type="button" [disabled]="!running()" (click)="toggleFullscreen()">Pełny ekran</button>
+    @if (tuning()) {
+      <span class="status">Strojenie: przesuwaj suwaki, prędkość i ranking są na odbiorniku. QR v{{ qrVersion() }}, wysłano {{ framesSent() }} kodów.</span>
+    }
     @if (colorTesting()) {
       <span class="status">Karta testowa koloru. Na odbiorniku włącz „Pomiar koloru”.</span>
     }
-    @if (running() && !calibrating() && !colorTesting()) {
+    @if (running() && !calibrating() && !colorTesting() && !tuning()) {
       <span class="status">
         Transfer #{{ transferId().toString(16) }}, QR v{{ qrVersion() }} ({{ qrModules() }}×{{ qrModules() }}),
         ramka {{ frameBytes() }} B, wysłano {{ framesSent() }} kodów
@@ -149,7 +158,7 @@
     }
     @if (calibrating()) {
       <span class="status">
-        Kalibracja {{ calibrationKind() === 'color' ? 'koloru ' : '' }}{{ calibrationPosition().current }}/{{ calibrationPosition().total }}:
+        Auto-przebieg {{ calibrationKind() === 'color' ? 'koloru ' : '' }}{{ calibrationPosition().current }}/{{ calibrationPosition().total }}:
         <strong>{{ calibrationProfileName() }}</strong> (QR v{{ qrVersion() }})
       </span>
     }
@@ -163,7 +172,8 @@
     <summary>Kanał zwrotny (dźwięk), opcjonalny</summary>
     <p class="hint">
       Odbiornik gra głośnikiem krótkie raporty, nadajnik słucha mikrofonem: zatrzymuje się po komplecie,
-      dosyła dokładnie brakujące bloki i może regulować tempo. Na odbiorniku włącz „Kanał zwrotny” w sekcji kamery.
+      dosyła dokładnie brakujące bloki, a w strojeniu pokazuje tempo zgłaszane przez odbiornik.
+      Na odbiorniku włącz „Kanał zwrotny” w sekcji kamery.
     </p>
     <div class="row">
       @if (!listening()) {
@@ -191,13 +201,13 @@
     @if (!running()) {
       <p class="placeholder">
         Tu pojawi się strumień kodów. Ustaw odbiornik tak, żeby kody wypełniały kadr.
-        „Kalibracja” nadaje po kolei wszystkie profile; odbiornik pokaże ranking z nazwami.
+        „Strojenie na żywo” pozwala dobrać parametry suwakami, patrząc na prędkość na odbiorniku.
       </p>
     }
   </div>
 
-  @if (running() && !colorTesting()) {
-    <div class="progress" [title]="calibrating() ? 'Postęp kalibracji' : 'Postęp pierwszego (systematycznego) cyklu'">
+  @if (running() && !colorTesting() && !tuning()) {
+    <div class="progress" [title]="calibrating() ? 'Postęp auto-przebiegu' : 'Postęp pierwszego (systematycznego) cyklu'">
       <div class="bar" [style.width.%]="calibrating() ? calibrationProgress() : cycleProgress()"></div>
     </div>
   }

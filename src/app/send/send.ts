@@ -9,6 +9,7 @@ import {
   viewChild,
 } from '@angular/core';
 import QRCode from 'qrcode';
+import { AudioFeedbackListener } from '../audio/ggwave';
 import { crc32, formatBytes, randomUint32, utf8Encode } from '../core/bytes';
 import {
   COLOR_TEST_MODULES,
@@ -18,7 +19,14 @@ import {
   paintTestCard,
 } from '../core/colortest';
 import { packContainer, type PackedContainer } from '../core/container';
-import { FLAG_CALIBRATION, FLAG_COLOR, HEADER_SIZE, type FrameHeader } from '../core/frame';
+import {
+  FEEDBACK_INTERVAL_MS,
+  FeedbackPlanner,
+  adjustFps,
+  decodeFeedback,
+  transferIdOf,
+} from '../core/feedback';
+import { FLAG_CALIBRATION, FLAG_COLOR, FLAG_TUNING, HEADER_SIZE, type FrameHeader } from '../core/frame';
 import { LtEncoder } from '../core/lt';
 import {
   CALIBRATION_MS,
@@ -30,21 +38,16 @@ import {
   calibrationPayload,
   calibrationRange,
   codesPerFrame,
+  encodeTuningId,
+  nominalBytesPerSecond,
   profileByName,
+  profileLabel,
   profileName,
   type CalibrationKind,
   type Grid,
   type Profile,
 } from '../core/profile';
 import { encodeWire } from '../core/wire';
-import {
-  FEEDBACK_INTERVAL_MS,
-  FeedbackPlanner,
-  adjustFps,
-  decodeFeedback,
-  transferIdOf,
-} from '../core/feedback';
-import { AudioFeedbackListener } from '../audio/ggwave';
 
 interface PreparedPayload {
   name: string;
@@ -55,7 +58,7 @@ interface PreparedPayload {
 
 type EcLevel = 'L' | 'M' | 'Q';
 
-export const BLOCK_PRESETS = [200, 400, 700, 1000, 1400, 2000];
+const GRIDS: Grid[] = [1, 2, 4];
 const PROFILE_STORAGE_KEY = 'qr-airgap.profile';
 
 interface CodeLayout {
@@ -75,7 +78,6 @@ interface CodeLayout {
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class Send implements OnDestroy {
-  readonly blockPresets = BLOCK_PRESETS;
   readonly formatBytes = formatBytes;
   readonly profileNames = CALIBRATION_PROFILES.map((p) => profileName(p)!);
   readonly calibrationSeconds = {
@@ -89,6 +91,7 @@ export class Send implements OnDestroy {
   readonly profileInput = signal('');
   readonly ecLevel = signal<EcLevel>('L');
   readonly running = signal(false);
+  readonly tuning = signal(false);
   readonly calibrating = signal(false);
   readonly calibrationKind = signal<CalibrationKind>('bw');
   readonly colorTesting = signal(false);
@@ -96,6 +99,7 @@ export class Send implements OnDestroy {
   readonly framesSent = signal(0);
   readonly qrVersion = signal(0);
   readonly qrModules = signal(0);
+  readonly transferId = signal(0);
   readonly error = signal('');
   readonly notice = signal('');
 
@@ -106,19 +110,26 @@ export class Send implements OnDestroy {
   readonly rateControl = signal(false);
   readonly lastReport = signal<{ decoded: number; blockCount: number; recentCodes: number; complete: boolean; at: number } | null>(null);
   readonly reportsReceived = signal(0);
-  readonly transferId = signal(0);
+  /** Tempo zgłaszane przez odbiornik w trybie strojenia (B/s). */
+  readonly receiverRate = signal<{ bytesPerSecond: number; at: number } | null>(null);
   readonly now = signal(performance.now());
   readonly reportAgeSeconds = computed(() => {
     const r = this.lastReport();
     return r ? Math.max(0, (this.now() - r.at) / 1000) : null;
   });
+  readonly receiverRateFresh = computed(() => {
+    const r = this.receiverRate();
+    return r && this.now() - r.at < 3 * FEEDBACK_INTERVAL_MS ? r.bytesPerSecond : null;
+  });
 
   readonly blockSize = computed(() => this.profile().blockSize);
   readonly fps = computed(() => this.profile().fps);
   readonly grid = computed(() => this.profile().grid);
+  readonly gridIndex = computed(() => Math.max(0, GRIDS.indexOf(this.grid())));
   readonly binary = computed(() => this.profile().binary);
   readonly color = computed(() => this.profile().color);
   readonly currentProfileName = computed(() => profileName(this.profile()));
+  readonly currentProfileLabel = computed(() => profileLabel(this.profile()));
 
   /** Dla małych wiadomości blok kurczy się do rozmiaru danych, żeby kod QR był jak najrzadszy. */
   readonly effectiveBlockSize = computed(() => {
@@ -138,7 +149,7 @@ export class Send implements OnDestroy {
     const k = this.blockCount();
     return k ? Math.min(100, (this.framesSent() / k) * 100) : 0;
   });
-  readonly throughput = computed(() => this.effectiveBlockSize() * this.codesPerSecond());
+  readonly nominal = computed(() => nominalBytesPerSecond(this.profile()));
   readonly calibrationProfileName = computed(
     () => profileName(CALIBRATION_PROFILES[this.calibrationIndex()]) ?? '',
   );
@@ -157,13 +168,13 @@ export class Send implements OnDestroy {
   private timer: ReturnType<typeof setInterval> | null = null;
   private encoder: LtEncoder | null = null;
   private header: FrameHeader | null = null;
-  private seed = 0;
   private layout: CodeLayout | null = null;
   private resizeObserver: ResizeObserver | null = null;
   private busy = false;
   private readonly scratch = document.createElement('canvas');
   private calibrationStartedAt = 0;
   private calibrationCodeIndex = 0;
+  private tuningCounter = 0;
   private planner: FeedbackPlanner | null = null;
   private listener: AudioFeedbackListener | null = null;
   private nowTimer: ReturnType<typeof setInterval> | null = null;
@@ -171,6 +182,191 @@ export class Send implements OnDestroy {
   ngOnDestroy(): void {
     this.stop();
     this.stopListening();
+  }
+
+  // --- źródło danych -------------------------------------------------------
+
+  async onFileSelected(event: Event): Promise<void> {
+    const input = event.target as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) return;
+    const data = new Uint8Array(await file.arrayBuffer());
+    this.setPayload(file.name, file.type || 'application/octet-stream', data);
+    input.value = '';
+  }
+
+  useText(): void {
+    const value = this.text();
+    if (!value.trim()) {
+      this.error.set('Wpisz jakiś tekst.');
+      return;
+    }
+    this.setPayload('wiadomosc.txt', 'text/plain', utf8Encode(value));
+  }
+
+  onTextInput(event: Event): void {
+    this.text.set((event.target as HTMLTextAreaElement).value);
+  }
+
+  // --- parametry (suwaki działają na żywo) ----------------------------------
+
+  onProfileInput(event: Event): void {
+    this.profileInput.set((event.target as HTMLInputElement).value);
+  }
+
+  applyProfileName(): void {
+    const found = profileByName(this.profileInput());
+    if (!found) {
+      this.error.set(`Nie znam profilu "${this.profileInput()}". Nazwy to np. ${this.profileNames[0]}.`);
+      return;
+    }
+    this.error.set('');
+    this.notice.set(`Profil ${profileName(found)}: ${profileLabel({ ...found, binary: false }).replace(' (base64)', '')}${found.binary ? ', binarny' : ', base64'}.`);
+    this.updateProfile(found);
+  }
+
+  onBlockSize(event: Event): void {
+    this.updateProfile({ ...this.profile(), blockSize: Number((event.target as HTMLInputElement).value) });
+  }
+
+  onFps(event: Event): void {
+    this.updateProfile({ ...this.profile(), fps: Number((event.target as HTMLInputElement).value) });
+  }
+
+  onGrid(event: Event): void {
+    const idx = Number((event.target as HTMLInputElement).value);
+    this.updateProfile({ ...this.profile(), grid: GRIDS[Math.max(0, Math.min(GRIDS.length - 1, idx))] });
+  }
+
+  onBinary(event: Event): void {
+    this.updateProfile({ ...this.profile(), binary: (event.target as HTMLInputElement).checked });
+  }
+
+  onColor(event: Event): void {
+    this.updateProfile({ ...this.profile(), color: (event.target as HTMLInputElement).checked });
+  }
+
+  onEcLevel(event: Event): void {
+    this.ecLevel.set((event.target as HTMLSelectElement).value as EcLevel);
+    this.applyLiveParams(true);
+  }
+
+  private updateProfile(p: Profile): void {
+    const prev = this.profile();
+    this.profile.set(p);
+    saveProfile(p);
+    const layoutChanged =
+      prev.blockSize !== p.blockSize || prev.grid !== p.grid || prev.binary !== p.binary || prev.color !== p.color;
+    this.applyLiveParams(layoutChanged);
+  }
+
+  /**
+   * Strojenie: parametry wchodzą natychmiast. Transfer: fps zmienia się w locie,
+   * reszta wymaga restartu (zmienia się liczba bloków, więc i transfer).
+   */
+  private applyLiveParams(layoutChanged: boolean): void {
+    if (!this.running() || this.calibrating() || this.colorTesting()) return;
+    if (this.tuning()) {
+      if (layoutChanged) this.prepareLayout(this.blockSize(), this.grid(), this.binary());
+      this.scheduleTimer(this.fps());
+      return;
+    }
+    if (layoutChanged) this.start();
+    else this.scheduleTimer(this.fps());
+  }
+
+  // --- nadawanie -----------------------------------------------------------
+
+  start(): void {
+    const payload = this.payload();
+    if (!payload) return;
+    this.stop();
+    this.error.set('');
+
+    const blockSize = this.effectiveBlockSize();
+    this.encoder = new LtEncoder(payload.packed.bytes, blockSize);
+    this.header = {
+      fileId: randomUint32(),
+      blockCount: this.encoder.blockCount,
+      blockSize,
+      dataLength: payload.packed.bytes.length,
+      flags: payload.packed.flags | (this.color() ? FLAG_COLOR : 0),
+      crc: crc32(payload.packed.bytes),
+      seed: 0,
+    };
+    this.framesSent.set(0);
+    this.planner = new FeedbackPlanner(this.encoder.blockCount, transferIdOf(this.header.fileId));
+    this.transferId.set(transferIdOf(this.header.fileId));
+    this.lastReport.set(null);
+    if (!this.prepareLayout(blockSize, this.grid(), this.binary())) return;
+
+    this.running.set(true);
+    this.observeStage();
+    this.renderNext();
+    this.scheduleTimer(this.fps());
+  }
+
+  /** Strojenie na żywo: ramki testowe z bieżącymi parametrami, suwaki działają natychmiast. */
+  startTuning(): void {
+    this.stop();
+    this.error.set('');
+    this.notice.set('');
+    this.receiverRate.set(null);
+    this.tuning.set(true);
+    this.running.set(true);
+    this.observeStage();
+    if (!this.prepareLayout(this.blockSize(), this.grid(), this.binary())) return;
+    this.renderNext();
+    this.scheduleTimer(this.fps());
+  }
+
+  startCalibration(kind: CalibrationKind): void {
+    this.stop();
+    this.error.set('');
+    this.notice.set('');
+    this.calibrationKind.set(kind);
+    const [from] = calibrationRange(kind);
+    this.calibrationIndex.set(from);
+    this.framesSent.set(0);
+    this.calibrating.set(true);
+    this.running.set(true);
+    this.observeStage();
+    this.enterCalibrationProfile(from);
+  }
+
+  /** Statyczna karta testowa do pomiaru koloru po stronie odbiornika. */
+  startColorTest(): void {
+    this.stop();
+    this.error.set('');
+    this.notice.set('');
+    this.colorTesting.set(true);
+    this.running.set(true);
+    this.observeStage();
+    this.drawColorCard();
+  }
+
+  stop(): void {
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+    this.resizeObserver?.disconnect();
+    this.resizeObserver = null;
+    this.running.set(false);
+    this.tuning.set(false);
+    this.calibrating.set(false);
+    this.colorTesting.set(false);
+  }
+
+  async toggleFullscreen(): Promise<void> {
+    const stage = this.stageRef()?.nativeElement;
+    if (!stage) return;
+    try {
+      if (document.fullscreenElement) await document.exitFullscreen();
+      else await stage.requestFullscreen();
+    } catch {
+      /* brak API pełnego ekranu np. w iOS Safari */
+    }
   }
 
   // --- kanał zwrotny -------------------------------------------------------
@@ -211,6 +407,17 @@ export class Send implements OnDestroy {
     if (!msg) return;
     const at = performance.now();
     this.reportsReceived.update((n) => n + 1);
+
+    if (this.tuning()) {
+      if (msg.transferId === (encodeTuningId(this.profile()) & 0xffff)) {
+        this.receiverRate.set({ bytesPerSecond: (msg.recentCodes * this.blockSize()) / (FEEDBACK_INTERVAL_MS / 1000), at });
+        this.listeningStatus.set('');
+      } else {
+        this.listeningStatus.set('Raport odbiornika dotyczy innych parametrów (jeszcze nie przestawił się).');
+      }
+      return;
+    }
+
     if (!this.planner || !this.planner.report(msg, at)) {
       this.listeningStatus.set(`Raport z innego transferu (#${msg.transferId.toString(16)}).`);
       return;
@@ -233,160 +440,7 @@ export class Send implements OnDestroy {
     }
   }
 
-  // --- źródło danych -------------------------------------------------------
-
-  async onFileSelected(event: Event): Promise<void> {
-    const input = event.target as HTMLInputElement;
-    const file = input.files?.[0];
-    if (!file) return;
-    const data = new Uint8Array(await file.arrayBuffer());
-    this.setPayload(file.name, file.type || 'application/octet-stream', data);
-    input.value = '';
-  }
-
-  useText(): void {
-    const value = this.text();
-    if (!value.trim()) {
-      this.error.set('Wpisz jakiś tekst.');
-      return;
-    }
-    this.setPayload('wiadomosc.txt', 'text/plain', utf8Encode(value));
-  }
-
-  onTextInput(event: Event): void {
-    this.text.set((event.target as HTMLTextAreaElement).value);
-  }
-
-  // --- parametry -----------------------------------------------------------
-
-  onProfileInput(event: Event): void {
-    this.profileInput.set((event.target as HTMLInputElement).value);
-  }
-
-  applyProfileName(): void {
-    const found = profileByName(this.profileInput());
-    if (!found) {
-      this.error.set(`Nie znam profilu "${this.profileInput()}". Nazwy to np. ${this.profileNames[0]}.`);
-      return;
-    }
-    this.error.set('');
-    this.notice.set(
-      `Profil ${profileName(found)}: ${found.blockSize} B, ${found.fps} kl/s, ${found.grid} komórk(i), ` +
-        `${found.color ? 'kolor RGB, ' : ''}${found.binary ? 'binarny' : 'base64'}.`,
-    );
-    this.updateProfile(found);
-  }
-
-  onBlockSize(event: Event): void {
-    this.updateProfile({ ...this.profile(), blockSize: Number((event.target as HTMLSelectElement).value) });
-  }
-
-  onFps(event: Event): void {
-    this.updateProfile({ ...this.profile(), fps: Number((event.target as HTMLInputElement).value) });
-  }
-
-  onGrid(event: Event): void {
-    this.updateProfile({ ...this.profile(), grid: Number((event.target as HTMLSelectElement).value) as Grid });
-  }
-
-  onBinary(event: Event): void {
-    this.updateProfile({ ...this.profile(), binary: (event.target as HTMLSelectElement).value === 'binary' });
-  }
-
-  onColor(event: Event): void {
-    this.updateProfile({ ...this.profile(), color: (event.target as HTMLSelectElement).value === 'rgb' });
-  }
-
-  onEcLevel(event: Event): void {
-    this.ecLevel.set((event.target as HTMLSelectElement).value as EcLevel);
-    this.restartIfRunning();
-  }
-
-  private updateProfile(p: Profile): void {
-    this.profile.set(p);
-    saveProfile(p);
-    this.restartIfRunning();
-  }
-
-  // --- nadawanie -----------------------------------------------------------
-
-  start(): void {
-    const payload = this.payload();
-    if (!payload) return;
-    this.stop();
-    this.error.set('');
-
-    const blockSize = this.effectiveBlockSize();
-    this.encoder = new LtEncoder(payload.packed.bytes, blockSize);
-    this.header = {
-      fileId: randomUint32(),
-      blockCount: this.encoder.blockCount,
-      blockSize,
-      dataLength: payload.packed.bytes.length,
-      flags: payload.packed.flags | (this.color() ? FLAG_COLOR : 0),
-      crc: crc32(payload.packed.bytes),
-      seed: 0,
-    };
-    this.seed = 0;
-    this.framesSent.set(0);
-    this.planner = new FeedbackPlanner(this.encoder.blockCount, transferIdOf(this.header.fileId));
-    this.transferId.set(transferIdOf(this.header.fileId));
-    this.lastReport.set(null);
-    if (!this.prepareLayout(blockSize, this.grid(), this.binary())) return;
-
-    this.running.set(true);
-    this.observeStage();
-    this.renderNext();
-    this.scheduleTimer(this.fps());
-  }
-
-  startCalibration(kind: CalibrationKind): void {
-    this.stop();
-    this.error.set('');
-    this.notice.set('');
-    this.calibrationKind.set(kind);
-    const [from] = calibrationRange(kind);
-    this.calibrationIndex.set(from);
-    this.framesSent.set(0);
-    this.calibrating.set(true);
-    this.running.set(true);
-    this.observeStage();
-    this.enterCalibrationProfile(from);
-  }
-
-  /** Statyczna karta testowa do pomiaru koloru po stronie odbiornika. */
-  startColorTest(): void {
-    this.stop();
-    this.error.set('');
-    this.notice.set('');
-    this.colorTesting.set(true);
-    this.running.set(true);
-    this.observeStage();
-    this.drawColorCard();
-  }
-
-  stop(): void {
-    if (this.timer) {
-      clearInterval(this.timer);
-      this.timer = null;
-    }
-    this.resizeObserver?.disconnect();
-    this.resizeObserver = null;
-    this.running.set(false);
-    this.calibrating.set(false);
-    this.colorTesting.set(false);
-  }
-
-  async toggleFullscreen(): Promise<void> {
-    const stage = this.stageRef()?.nativeElement;
-    if (!stage) return;
-    try {
-      if (document.fullscreenElement) await document.exitFullscreen();
-      else await stage.requestFullscreen();
-    } catch {
-      /* brak API pełnego ekranu np. w iOS Safari */
-    }
-  }
+  // --- rysowanie -----------------------------------------------------------
 
   private setPayload(name: string, mime: string, data: Uint8Array): void {
     this.stop();
@@ -395,14 +449,9 @@ export class Send implements OnDestroy {
     this.payload.set({ name, mime, size: data.length, packed });
   }
 
-  private restartIfRunning(): void {
-    if (this.calibrating() || this.colorTesting()) return;
-    if (this.running()) this.start();
-  }
-
   private scheduleTimer(fps: number): void {
     if (this.timer) clearInterval(this.timer);
-    this.timer = setInterval(() => this.renderNext(), Math.round(1000 / fps));
+    this.timer = setInterval(() => this.renderNext(), Math.round(1000 / Math.max(1, fps)));
   }
 
   /** Wyznacza wersję QR dla ramki o zadanym rozmiarze i skalę, żeby siatka mieściła się na scenie. */
@@ -426,13 +475,14 @@ export class Send implements OnDestroy {
       this.layout = { version: probe.version, modules: probe.modules.size, margin: 3, scale: 2, cols, rows };
       this.qrVersion.set(probe.version);
       this.qrModules.set(probe.modules.size);
+      this.error.set('');
       this.fitScale();
       return true;
     } catch (err) {
       this.error.set(
-        `Ramka ${HEADER_SIZE + blockSize} B nie mieści się w kodzie QR (${String(err)}). Zmniejsz rozmiar bloku, użyj trybu binarnego lub niższej korekcji.`,
+        `Ramka ${HEADER_SIZE + blockSize} B nie mieści się w kodzie QR (${String(err)}). Zmniejsz rozmiar bloku, włącz kodowanie binarne lub obniż korekcję.`,
       );
-      this.stop();
+      if (!this.tuning()) this.stop();
       return false;
     }
   }
@@ -443,6 +493,7 @@ export class Send implements OnDestroy {
     this.busy = true;
     try {
       if (this.calibrating()) this.renderCalibrationFrame(canvas);
+      else if (this.tuning()) this.renderTuningFrame(canvas);
       else this.renderTransferFrame(canvas);
     } catch (err) {
       this.error.set(String(err));
@@ -471,6 +522,29 @@ export class Send implements OnDestroy {
     this.framesSent.update((n) => n + wires.length);
   }
 
+  private renderTuningFrame(canvas: HTMLCanvasElement): void {
+    const profile = this.profile();
+    const id = encodeTuningId(profile);
+    const wires: Uint8Array[] = [];
+    for (let i = 0; i < codesPerFrame(profile); i++) {
+      const seed = this.tuningCounter++ >>> 0;
+      const header: FrameHeader = {
+        fileId: id,
+        blockCount: this.codesPerSecond(),
+        blockSize: profile.blockSize,
+        dataLength: CALIBRATION_TABLE_VERSION,
+        flags: FLAG_CALIBRATION | FLAG_TUNING | (profile.color ? FLAG_COLOR : 0),
+        crc: 0,
+        seed,
+      };
+      wires.push(
+        encodeWire({ header, payload: calibrationPayload(id & 0xffff, seed, profile.blockSize) }, profile.binary),
+      );
+    }
+    this.drawCodes(canvas, wires, profile.color);
+    this.framesSent.update((n) => n + wires.length);
+  }
+
   private renderCalibrationFrame(canvas: HTMLCanvasElement): void {
     const idx = this.calibrationIndex();
     const [, end] = calibrationRange(this.calibrationKind());
@@ -480,9 +554,7 @@ export class Send implements OnDestroy {
     if (elapsed >= CALIBRATION_MS || this.calibrationCodeIndex >= total) {
       if (idx + 1 >= end) {
         this.stop();
-        this.notice.set(
-          'Kalibracja zakończona. Odczytaj ranking na odbiorniku i wpisz nazwę najlepszego profilu powyżej.',
-        );
+        this.notice.set('Przebieg zakończony. Ranking jest na odbiorniku; ustaw suwaki według najlepszego wiersza.');
         return;
       }
       this.calibrationIndex.set(idx + 1);
@@ -568,7 +640,6 @@ export class Send implements OnDestroy {
         });
         const data = code.modules.data;
         if (color) {
-          // Moduł ciemny w kodzie kanału ch gasi tylko ten kanał.
           for (let m = 0; m < size * size; m++) {
             if (data[m]) px[m * 4 + ch] = 0;
           }

@@ -7,8 +7,13 @@ import {
   calibrationPayload,
   calibrationRange,
   codesPerFrame,
+  decodeTuningId,
+  encodeTuningId,
+  nominalBytesPerSecond,
   profileByName,
   profileIndex,
+  profileKey,
+  profileLabel,
   profileName,
 } from './profile';
 import { decodeWire, diagnoseWire, encodeWire, looksLikeBinaryFrame } from './wire';
@@ -56,6 +61,22 @@ describe('profiles', () => {
     expect(codesPerFrame(color)).toBe(6);
     expect(calibrationCodes(bw)).toBe(80);
     expect(calibrationCodes(color)).toBe(120);
+  });
+});
+
+describe('tuning id', () => {
+  it('round-trips every combination and labels profiles', () => {
+    for (const fps of [2, 7, 20])
+      for (const grid of [1, 2, 4] as const)
+        for (const color of [false, true])
+          for (const binary of [false, true]) {
+            const p = { blockSize: 650, fps, grid, color, binary };
+            expect(decodeTuningId(encodeTuningId(p), 650)).toEqual(p);
+            expect(profileKey(p)).toContain(`650|${fps}|${grid}`);
+          }
+    expect(profileLabel({ blockSize: 700, fps: 10, grid: 2, color: false, binary: true })).toBe('Żwawy Wilk');
+    expect(profileLabel({ blockSize: 650, fps: 7, grid: 2, color: true, binary: false })).toBe('650 B × 2×RGB × 7 kl/s (base64)');
+    expect(nominalBytesPerSecond({ blockSize: 700, fps: 10, grid: 2, color: true, binary: true })).toBe(42_000);
   });
 });
 

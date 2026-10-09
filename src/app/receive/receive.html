@@ -57,7 +57,7 @@
     <summary>Kanał zwrotny (dźwięk), opcjonalny</summary>
     <p class="hint">
       To urządzenie gra głośnikiem krótkie raporty o postępie; nadajnik z włączonym nasłuchem zatrzyma się po
-      komplecie i dośle dokładnie to, czego brakuje. Odbiornik tylko gra, nigdy nie słucha.
+      komplecie, dośle dokładnie to, czego brakuje, a w strojeniu zobaczy zmierzone tempo. Odbiornik tylko gra.
     </p>
     <div class="controls">
       <label class="field">
@@ -91,14 +91,67 @@
     <p class="hint notice">{{ notice() }}</p>
   }
 
-  <div class="viewfinder" [class.hit]="lastCodeAt() > 0 && running()">
-    <video #video playsinline muted autoplay></video>
-    @if (running()) {
-      <span class="badge">
-        {{ engine() === 'native' ? 'BarcodeDetector' : 'ZXing wasm' }}{{ colorActive() ? ' · RGB' : '' }} ·
-        {{ scanRate() | number: '1.0-0' }} kl/s · {{ codeRate() | number: '1.1-1' }} kodów/s
-      </span>
-    }
+  <div class="live-grid">
+    <div class="viewfinder" [class.hit]="lastCodeAt() > 0 && running()">
+      <video #video playsinline muted autoplay></video>
+      @if (running()) {
+        <span class="badge">
+          {{ engine() === 'native' ? 'BarcodeDetector' : 'ZXing wasm' }}{{ colorActive() ? ' · RGB' : '' }} ·
+          {{ scanRate() | number: '1.0-0' }} kl/s · {{ codeRate() | number: '1.1-1' }} kodów/s
+        </span>
+      }
+    </div>
+
+    <aside class="ranking">
+      <div class="live-rate" [class.idle]="!live()">
+        @if (live(); as l) {
+          <span class="label">teraz</span>
+          <strong>{{ formatBytes(l.bytesPerSecond) }}/s</strong>
+          <small>{{ l.codesPerSecond | number: '1.0-0' }} kodów/s · {{ l.label }}</small>
+          <small>nominalnie {{ formatBytes(l.nominal) }}/s ({{ l.nominal > 0 ? ((l.bytesPerSecond / l.nominal) * 100 | number: '1.0-0') : 0 }}%)</small>
+        } @else {
+          <span class="label">teraz</span>
+          <strong>—</strong>
+          <small>Na nadajniku włącz „Strojenie na żywo” i przesuwaj suwaki.</small>
+        }
+      </div>
+
+      @if (measureStalledSeconds(); as idle) {
+        <p class="hint notice">Od {{ idle }} s nic nie dociera: te parametry są za gęste dla tej kamery.</p>
+      }
+
+      @if (ranking().length) {
+        <h3>Ranking <small>(najlepsze okno 3 s)</small></h3>
+        <table class="calibration">
+          <thead>
+            <tr>
+              <th>parametry</th>
+              <th>najlepiej</th>
+              <th>teraz</th>
+            </tr>
+          </thead>
+          <tbody>
+            @for (row of ranking(); track row.key) {
+              <tr [class.best]="$first" [class.live]="row.live">
+                <td>
+                  @if (row.named) {
+                    <button type="button" class="link" (click)="copyName(row.label)">{{ row.label }}</button>
+                    <small>{{ row.profile.blockSize }} B × {{ row.profile.grid }}{{ row.profile.color ? '×RGB' : '' }} × {{ row.profile.fps }} kl/s</small>
+                  } @else {
+                    {{ row.label }}
+                  }
+                  @if (row.sweepSent) {
+                    <small>przebieg {{ row.sweepReceived }}/{{ row.sweepSent }}</small>
+                  }
+                </td>
+                <td>{{ formatBytes(row.best) }}/s</td>
+                <td>{{ row.live ? formatBytes(row.last) + '/s' : '' }}</td>
+              </tr>
+            }
+          </tbody>
+        </table>
+      }
+    </aside>
   </div>
 </section>
 
@@ -171,57 +224,6 @@
   </section>
 }
 
-@if (calibrationRows().length) {
-  <section class="panel">
-    <h2>Kalibracja</h2>
-    @if (calibrationStalledSeconds(); as idle) {
-      <p class="hint notice">
-        Od {{ idle }} s nie dociera żaden kod: kolejne profile są za gęste dla tej kamery. Możesz zatrzymać nadajnik,
-        ranking poniżej jest już miarodajny.
-      </p>
-    } @else if (calibrationCurrent()) {
-      <p class="hint">Odbieram profil: <strong>{{ calibrationCurrent() }}</strong>. Ranking aktualizuje się na bieżąco.</p>
-    }
-    @if (bestCalibration(); as best) {
-      <div class="result">
-        <h3>Najlepszy: {{ best.name }}</h3>
-        <p>
-          {{ formatBytes(best.bytesPerSecond) }}/s · {{ best.profile.blockSize }} B × {{ best.profile.grid }} komórk(i)
-          {{ best.profile.color ? '× 3 kanały RGB' : '' }} × {{ best.profile.fps }} kl/s · odebrano
-          {{ best.received }}/{{ best.sent }}
-        </p>
-        <button type="button" class="primary" (click)="copyName(best.name)">Kopiuj nazwę profilu</button>
-      </div>
-    }
-    <table class="calibration">
-      <thead>
-        <tr>
-          <th>Profil</th>
-          <th>B/kod</th>
-          <th>kl/s</th>
-          <th>komórek</th>
-          <th>kolor</th>
-          <th>odebrano</th>
-          <th>przepustowość</th>
-        </tr>
-      </thead>
-      <tbody>
-        @for (row of calibrationRows(); track row.index) {
-          <tr [class.best]="$first">
-            <td><button type="button" class="link" (click)="copyName(row.name)">{{ row.name }}</button></td>
-            <td>{{ row.profile.blockSize }}</td>
-            <td>{{ row.profile.fps }}</td>
-            <td>{{ row.profile.grid }}</td>
-            <td>{{ row.profile.color ? 'RGB' : 'b/w' }}</td>
-            <td>{{ row.received }}/{{ row.sent }} ({{ (row.received / row.sent) * 100 | number: '1.0-0' }}%)</td>
-            <td>{{ formatBytes(row.bytesPerSecond) }}/s</td>
-          </tr>
-        }
-      </tbody>
-    </table>
-  </section>
-}
-
 <section class="panel">
   <h2>Odbiór</h2>
 
@@ -252,7 +254,6 @@
     <p class="hint">
       Skieruj kamerę na ekran nadajnika. Kody powinny wypełniać możliwie dużą część kadru i być ostre.
       Odbiór zaczyna się automatycznie po rozpoznaniu pierwszego kodu, kolejność nie ma znaczenia.
-      Jeśli nadajnik uruchomi kalibrację, pojawi się tu ranking profili.
     </p>
     @if (running() && stats().invalid > 0) {
       <p class="hint notice">

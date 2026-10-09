@@ -154,3 +154,45 @@ export function calibrationPayload(profileIdx: number, seed: number, size: numbe
 }
 
 export const DEFAULT_PROFILE: Profile = { blockSize: 700, fps: 10, grid: 1, binary: false, color: false };
+
+// --- strojenie na żywo --------------------------------------------------------
+
+const GRID_CODES: Record<Grid, number> = { 1: 0, 2: 1, 4: 2 };
+const GRIDS_BY_CODE: Grid[] = [1, 2, 4];
+
+/**
+ * Parametry nadajnika upakowane w fileId ramki strojeniowej:
+ * bity 0–7 fps, 8–9 siatka (0=1, 1=2, 2=4), bit 10 kolor, bit 11 binarne.
+ * Rozmiar bloku jedzie w nagłówku jako blockSize.
+ */
+export function encodeTuningId(p: Profile): number {
+  return ((p.fps & 0xff) | (GRID_CODES[p.grid] << 8) | ((p.color ? 1 : 0) << 10) | ((p.binary ? 1 : 0) << 11)) >>> 0;
+}
+
+export function decodeTuningId(id: number, blockSize: number): Profile {
+  return {
+    blockSize,
+    fps: id & 0xff,
+    grid: GRIDS_BY_CODE[(id >>> 8) & 0b11] ?? 1,
+    color: ((id >>> 10) & 1) === 1,
+    binary: ((id >>> 11) & 1) === 1,
+  };
+}
+
+/** Klucz grupujący pomiary tej samej kombinacji parametrów. */
+export function profileKey(p: Profile): string {
+  return `${p.blockSize}|${p.fps}|${p.grid}|${p.color ? 'c' : 'm'}|${p.binary ? 'b' : 't'}`;
+}
+
+/** Nazwa z tabeli albo opis parametrów. */
+export function profileLabel(p: Profile): string {
+  return (
+    profileName(p) ??
+    `${p.blockSize} B × ${p.grid}${p.color ? '×RGB' : ''} × ${p.fps} kl/s${p.binary ? '' : ' (base64)'}`
+  );
+}
+
+/** Nominalna przepustowość w bajtach na sekundę. */
+export function nominalBytesPerSecond(p: Profile): number {
+  return p.blockSize * codesPerFrame(p) * p.fps;
+}

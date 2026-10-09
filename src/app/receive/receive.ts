@@ -9,6 +9,7 @@ import {
   signal,
   viewChild,
 } from '@angular/core';
+import { AudioFeedbackPlayer, FEEDBACK_PROTOCOLS, type FeedbackProtocol } from '../audio/ggwave';
 import { crc32, formatBytes, utf8Decode } from '../core/bytes';
 import {
   analyzeColorTest,
@@ -18,20 +19,22 @@ import {
   type Corners,
 } from '../core/colortest';
 import { unpackContainer } from '../core/container';
-import { FLAG_CALIBRATION, FLAG_COLOR, sameTransfer, type FrameHeader } from '../core/frame';
+import { FEEDBACK_INTERVAL_MS, FEEDBACK_MAX_MISSING, encodeFeedback, transferIdOf } from '../core/feedback';
+import { FLAG_CALIBRATION, FLAG_COLOR, FLAG_TUNING, FRAME_VERSION, sameTransfer, type FrameHeader } from '../core/frame';
 import { LtDecoder } from '../core/lt';
 import {
-  CALIBRATION_MS,
   CALIBRATION_PROFILES,
   CALIBRATION_TABLE_VERSION,
   calibrationCodes,
+  decodeTuningId,
+  encodeTuningId,
+  nominalBytesPerSecond,
+  profileKey,
+  profileLabel,
   profileName,
   type Profile,
 } from '../core/profile';
 import { decodeWire, diagnoseWire, type ScanHit } from '../core/wire';
-import { FRAME_VERSION } from '../core/frame';
-import { FEEDBACK_INTERVAL_MS, FEEDBACK_MAX_MISSING, encodeFeedback, transferIdOf } from '../core/feedback';
-import { AudioFeedbackPlayer, FEEDBACK_PROTOCOLS, type FeedbackProtocol } from '../audio/ggwave';
 import { createQrScanner, type QrScanner, type ScanEngine } from '../scan/qr-scanner';
 
 interface ScanStats {
@@ -50,19 +53,40 @@ interface ReceivedFile {
   text: string | null;
 }
 
-interface CalibrationEntry {
-  seen: Set<number>;
+/** Pomiar jednej kombinacji parametrów: unikatowe kody w ruchomym oknie. */
+interface Measurement {
+  key: string;
+  profile: Profile;
+  label: string;
+  named: boolean;
+  seeds: Map<number, number>;
   firstAt: number;
   lastAt: number;
+  last: number;
+  best: number;
+  codesPerSecond: number;
+  uniqueTotal: number;
+  sweepSent: number;
 }
 
-export interface CalibrationRow {
-  index: number;
-  name: string;
+export interface RankingRow {
+  key: string;
+  label: string;
+  named: boolean;
   profile: Profile;
-  received: number;
-  sent: number;
+  nominal: number;
+  best: number;
+  last: number;
+  live: boolean;
+  sweepReceived: number;
+  sweepSent: number;
+}
+
+export interface LiveRate {
+  label: string;
   bytesPerSecond: number;
+  codesPerSecond: number;
+  nominal: number;
 }
 
 type ColorMode = 'auto' | 'on' | 'off';
@@ -77,6 +101,10 @@ const RESOLUTIONS = [
 const COLOR_PROBE_EVERY = 3;
 /** Po ilu kolorowych klatkach bez odczytu wrócić do trybu czarno-białego. */
 const COLOR_IDLE_FRAMES = 40;
+/** Okno pomiaru prędkości na żywo. */
+const MEASURE_WINDOW_MS = 3000;
+/** Po jakim czasie bez kodów wiersz przestaje być "na żywo". */
+const LIVE_TIMEOUT_MS = 1500;
 
 @Component({
   selector: 'app-receive',
@@ -108,9 +136,12 @@ export class Receive implements OnInit, OnDestroy {
   readonly elapsed = signal(0);
   readonly result = signal<ReceivedFile | null>(null);
   readonly lastCodeAt = signal(0);
-  readonly calibrationRows = signal<CalibrationRow[]>([]);
-  readonly calibrationCurrent = signal('');
-  readonly lastCalibrationAt = signal(0);
+
+  // Ranking na żywo (strojenie i auto-przebieg).
+  readonly ranking = signal<RankingRow[]>([]);
+  readonly live = signal<LiveRate | null>(null);
+  readonly lastMeasureAt = signal(0);
+
   readonly feedbackProtocols = FEEDBACK_PROTOCOLS;
   readonly feedbackEnabled = signal(false);
   readonly feedbackProtocol = signal<FeedbackProtocol>('audible-fast');
@@ -134,14 +165,14 @@ export class Receive implements OnInit, OnDestroy {
     if (!t || !rate) return null;
     return Math.max(0, (t.blockCount - this.decoded()) / rate);
   });
-  readonly bestCalibration = computed(() => this.calibrationRows()[0] ?? null);
-  /** Kalibracja trwała, ale od dłuższej chwili nic nie dociera: kolejne profile są za gęste. */
-  readonly calibrationStalledSeconds = computed(() => {
+  readonly best = computed(() => this.ranking()[0] ?? null);
+  /** Pomiar trwał, ale od dłuższej chwili nic nie dociera: kolejne parametry są za gęste. */
+  readonly measureStalledSeconds = computed(() => {
     this.elapsed();
-    const last = this.lastCalibrationAt();
+    const last = this.lastMeasureAt();
     if (!last || !this.running()) return 0;
     const idle = (performance.now() - last) / 1000;
-    return idle > (3 * CALIBRATION_MS) / 1000 ? Math.round(idle) : 0;
+    return idle > 6 ? Math.round(idle) : 0;
   });
 
   private readonly videoRef = viewChild<ElementRef<HTMLVideoElement>>('video');
@@ -154,8 +185,8 @@ export class Receive implements OnInit, OnDestroy {
   private clock: ReturnType<typeof setInterval> | null = null;
   private gridDirty = false;
   private loopToken = 0;
-  private readonly calibration = new Map<number, CalibrationEntry>();
-  private calibrationDirty = false;
+  private readonly measurements = new Map<string, Measurement>();
+  private currentKey = '';
   private readonly colorCanvas = document.createElement('canvas');
   private readonly colorCard = buildTestCard();
   private frameCounter = 0;
@@ -176,81 +207,7 @@ export class Receive implements OnInit, OnDestroy {
     this.disableFeedback();
   }
 
-  // --- kanał zwrotny (dźwięk) ---------------------------------------------
-
-  async toggleFeedback(): Promise<void> {
-    if (this.feedbackEnabled()) {
-      this.disableFeedback();
-      return;
-    }
-    this.feedbackStatus.set('Ładuję ggwave…');
-    try {
-      this.player = await AudioFeedbackPlayer.create(document.baseURI);
-      this.feedbackEnabled.set(true);
-      this.feedbackStatus.set('Raporty będą grane co 2,5 s, gdy trwa odbiór.');
-      this.feedbackTimer = setInterval(() => this.sendFeedback(), FEEDBACK_INTERVAL_MS);
-    } catch (err) {
-      this.feedbackStatus.set(`Nie udało się włączyć: ${this.describeError(err)}`);
-    }
-  }
-
-  disableFeedback(): void {
-    if (this.feedbackTimer) {
-      clearInterval(this.feedbackTimer);
-      this.feedbackTimer = null;
-    }
-    this.player?.destroy();
-    this.player = null;
-    this.feedbackEnabled.set(false);
-  }
-
-  onFeedbackProtocol(event: Event): void {
-    this.feedbackProtocol.set((event.target as HTMLSelectElement).value as FeedbackProtocol);
-  }
-
-  onFeedbackVolume(event: Event): void {
-    this.feedbackVolume.set(Number((event.target as HTMLInputElement).value));
-  }
-
-  /** Gra przykładowy raport, żeby sprawdzić głośność i czy nadajnik słyszy. */
-  testFeedback(): void {
-    if (!this.player) return;
-    const bytes = encodeFeedback({ transferId: 0, decoded: 0, blockCount: 0, recentCodes: 0, complete: false, missing: [] });
-    const seconds = this.player.play(bytes, this.feedbackProtocol(), this.feedbackVolume());
-    this.feedbackStatus.set(`Test: ${bytes.length} B w ${seconds.toFixed(1)} s.`);
-  }
-
-  private sendFeedback(): void {
-    const t = this.transfer();
-    const decoder = this.decoder;
-    if (!this.player || !t || !decoder || this.player.busy) return;
-    if (decoder.isComplete) {
-      if (this.completeReports >= 4) return;
-      this.completeReports++;
-    }
-    const since = performance.now() - FEEDBACK_INTERVAL_MS;
-    this.codeTimes = this.codeTimes.filter((ts) => ts >= since);
-    const missing: number[] = [];
-    const remaining = decoder.blockCount - decoder.decodedCount;
-    if (remaining > 0 && remaining <= FEEDBACK_MAX_MISSING) {
-      for (let i = 0; i < decoder.blockCount && missing.length < FEEDBACK_MAX_MISSING; i++) {
-        if (!decoder.blocks[i]) missing.push(i);
-      }
-    }
-    const bytes = encodeFeedback({
-      transferId: transferIdOf(t.fileId),
-      decoded: decoder.decodedCount,
-      blockCount: decoder.blockCount,
-      recentCodes: this.codeTimes.length,
-      complete: decoder.isComplete,
-      missing,
-    });
-    const seconds = this.player.play(bytes, this.feedbackProtocol(), this.feedbackVolume());
-    this.feedbackSent.update((n) => n + 1);
-    this.feedbackStatus.set(
-      `Raport #${this.feedbackSent()}: ${decoder.decodedCount}/${decoder.blockCount}, ${this.codeTimes.length} kodów w oknie, ${bytes.length} B w ${seconds.toFixed(1)} s.`,
-    );
-  }
+  // --- kamera i ustawienia ---------------------------------------------------
 
   onCamera(event: Event): void {
     this.selectedCamera.set((event.target as HTMLSelectElement).value);
@@ -336,13 +293,16 @@ export class Receive implements OnInit, OnDestroy {
     this.stats.set({ frames: 0, codes: 0, useful: 0, duplicates: 0, invalid: 0 });
     this.startedAt = performance.now();
     this.elapsed.set(0);
-    this.calibration.clear();
-    this.calibrationRows.set([]);
-    this.calibrationCurrent.set('');
-    this.lastCalibrationAt.set(0);
+    this.measurements.clear();
+    this.currentKey = '';
+    this.ranking.set([]);
+    this.live.set(null);
+    this.lastMeasureAt.set(0);
     this.notice.set('');
+    this.error.set('');
     this.colorActive.set(this.colorMode() === 'on');
     this.colorIdle = 0;
+    this.codeTimes = [];
     this.drawGrid();
   }
 
@@ -350,6 +310,111 @@ export class Receive implements OnInit, OnDestroy {
     const text = this.result()?.text;
     if (text) await navigator.clipboard.writeText(text);
   }
+
+  async copyName(name: string): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(name);
+      this.notice.set(`Skopiowano "${name}". Wpisz tę nazwę w polu profilu na nadajniku.`);
+    } catch {
+      this.notice.set(`Nazwa profilu: ${name}`);
+    }
+  }
+
+  // --- kanał zwrotny (dźwięk) ---------------------------------------------
+
+  async toggleFeedback(): Promise<void> {
+    if (this.feedbackEnabled()) {
+      this.disableFeedback();
+      return;
+    }
+    this.feedbackStatus.set('Ładuję ggwave…');
+    try {
+      this.player = await AudioFeedbackPlayer.create(document.baseURI);
+      this.feedbackEnabled.set(true);
+      this.feedbackStatus.set('Raporty będą grane co 2,5 s, gdy trwa odbiór lub strojenie.');
+      this.feedbackTimer = setInterval(() => this.sendFeedback(), FEEDBACK_INTERVAL_MS);
+    } catch (err) {
+      this.feedbackStatus.set(`Nie udało się włączyć: ${this.describeError(err)}`);
+    }
+  }
+
+  disableFeedback(): void {
+    if (this.feedbackTimer) {
+      clearInterval(this.feedbackTimer);
+      this.feedbackTimer = null;
+    }
+    this.player?.destroy();
+    this.player = null;
+    this.feedbackEnabled.set(false);
+  }
+
+  onFeedbackProtocol(event: Event): void {
+    this.feedbackProtocol.set((event.target as HTMLSelectElement).value as FeedbackProtocol);
+  }
+
+  onFeedbackVolume(event: Event): void {
+    this.feedbackVolume.set(Number((event.target as HTMLInputElement).value));
+  }
+
+  /** Gra przykładowy raport, żeby sprawdzić głośność i czy nadajnik słyszy. */
+  testFeedback(): void {
+    if (!this.player) return;
+    const bytes = encodeFeedback({ transferId: 0, decoded: 0, blockCount: 0, recentCodes: 0, complete: false, missing: [] });
+    const seconds = this.player.play(bytes, this.feedbackProtocol(), this.feedbackVolume());
+    this.feedbackStatus.set(`Test: ${bytes.length} B w ${seconds.toFixed(1)} s.`);
+  }
+
+  private sendFeedback(): void {
+    if (!this.player || this.player.busy) return;
+    const since = performance.now() - FEEDBACK_INTERVAL_MS;
+    this.codeTimes = this.codeTimes.filter((ts) => ts >= since);
+
+    const t = this.transfer();
+    const decoder = this.decoder;
+    if (!t || !decoder) {
+      // Strojenie: raport z tempem dla bieżącej kombinacji parametrów.
+      const m = this.measurements.get(this.currentKey);
+      if (!m || performance.now() - m.lastAt > LIVE_TIMEOUT_MS) return;
+      const bytes = encodeFeedback({
+        transferId: encodeTuningId(m.profile) & 0xffff,
+        decoded: 0,
+        blockCount: 0,
+        recentCodes: this.codeTimes.length,
+        complete: false,
+        missing: [],
+      });
+      this.player.play(bytes, this.feedbackProtocol(), this.feedbackVolume());
+      this.feedbackSent.update((n) => n + 1);
+      this.feedbackStatus.set(`Raport strojenia #${this.feedbackSent()}: ${this.codeTimes.length} kodów w oknie.`);
+      return;
+    }
+    if (decoder.isComplete) {
+      if (this.completeReports >= 4) return;
+      this.completeReports++;
+    }
+    const missing: number[] = [];
+    const remaining = decoder.blockCount - decoder.decodedCount;
+    if (remaining > 0 && remaining <= FEEDBACK_MAX_MISSING) {
+      for (let i = 0; i < decoder.blockCount && missing.length < FEEDBACK_MAX_MISSING; i++) {
+        if (!decoder.blocks[i]) missing.push(i);
+      }
+    }
+    const bytes = encodeFeedback({
+      transferId: transferIdOf(t.fileId),
+      decoded: decoder.decodedCount,
+      blockCount: decoder.blockCount,
+      recentCodes: this.codeTimes.length,
+      complete: decoder.isComplete,
+      missing,
+    });
+    const seconds = this.player.play(bytes, this.feedbackProtocol(), this.feedbackVolume());
+    this.feedbackSent.update((n) => n + 1);
+    this.feedbackStatus.set(
+      `Raport #${this.feedbackSent()}: ${decoder.decodedCount}/${decoder.blockCount}, ${this.codeTimes.length} kodów w oknie, ${bytes.length} B w ${seconds.toFixed(1)} s.`,
+    );
+  }
+
+  // --- pomiar koloru ----------------------------------------------------------
 
   toggleColorTest(): void {
     this.colorTesting.update((v) => !v);
@@ -390,14 +455,7 @@ export class Receive implements OnInit, OnDestroy {
     }
   }
 
-  async copyName(name: string): Promise<void> {
-    try {
-      await navigator.clipboard.writeText(name);
-      this.notice.set(`Skopiowano "${name}". Wpisz tę nazwę w polu profilu na nadajniku.`);
-    } catch {
-      this.notice.set(`Nazwa profilu: ${name}`);
-    }
-  }
+  // --- pętla skanowania -------------------------------------------------------
 
   private async loop(token: number, video: HTMLVideoElement): Promise<void> {
     while (token === this.loopToken && this.scanner) {
@@ -490,7 +548,8 @@ export class Receive implements OnInit, OnDestroy {
 
     if (frame.header.flags & FLAG_CALIBRATION) {
       this.stats.update((s) => ({ ...s, codes: s.codes + 1 }));
-      this.handleCalibration(frame.header);
+      this.codeTimes.push(performance.now());
+      this.handleMeasurement(frame.header);
       return;
     }
 
@@ -514,7 +573,115 @@ export class Receive implements OnInit, OnDestroy {
     }
   }
 
-  /** Jedna próbka pomiaru koloru: klatka → pozycja kodu kotwiczącego → analiza pól i pasków. */
+  /** Silnik natywny nie oddaje bajtów; przy ramkach binarnych przełącza się na ZXing. */
+  private switchToWasm(): void {
+    if (this.preferredEngine() === 'wasm') return;
+    this.unreadableStreak = 0;
+    this.notice.set('Silnik natywny nie czyta tych kodów (ramki binarne). Przełączam dekoder na ZXing WebAssembly.');
+    this.preferredEngine.set('wasm');
+    void this.start();
+  }
+
+  // --- pomiar prędkości i ranking -------------------------------------------
+
+  /** Ramka strojeniowa (parametry w fileId) albo z auto-przebiegu (indeks tabeli w fileId). */
+  private handleMeasurement(header: FrameHeader): void {
+    if (header.dataLength !== CALIBRATION_TABLE_VERSION) {
+      this.error.set('Nadajnik ma inną wersję tabeli profili. Zaktualizuj aplikację po obu stronach.');
+      return;
+    }
+    const tuningFrame = (header.flags & FLAG_TUNING) !== 0;
+    let profile: Profile;
+    let sweepSent = 0;
+    if (tuningFrame) {
+      profile = decodeTuningId(header.fileId, header.blockSize);
+    } else {
+      const fromTable = CALIBRATION_PROFILES[header.fileId];
+      if (!fromTable || fromTable.blockSize !== header.blockSize) return;
+      profile = fromTable;
+      sweepSent = calibrationCodes(profile);
+    }
+    const now = performance.now();
+    const key = profileKey(profile);
+    let m = this.measurements.get(key);
+    if (!m) {
+      m = {
+        key,
+        profile,
+        label: profileLabel(profile),
+        named: profileName(profile) !== null,
+        seeds: new Map(),
+        firstAt: now,
+        lastAt: now,
+        last: 0,
+        best: 0,
+        codesPerSecond: 0,
+        uniqueTotal: 0,
+        sweepSent,
+      };
+      this.measurements.set(key, m);
+    }
+    if (now - m.lastAt > LIVE_TIMEOUT_MS) {
+      // Powrót do tej kombinacji po przerwie: okno liczy się od nowa.
+      m.seeds.clear();
+      m.firstAt = now;
+    }
+    if (!m.seeds.has(header.seed)) m.uniqueTotal++;
+    m.seeds.set(header.seed, now);
+    m.lastAt = now;
+    if (sweepSent) m.sweepSent = sweepSent;
+    this.currentKey = key;
+    this.lastMeasureAt.set(now);
+  }
+
+  /** Co 250 ms: prędkości w ruchomym oknie, ranking i wiersz "na żywo". */
+  private updateMeasurements(): void {
+    const now = performance.now();
+    const rows: RankingRow[] = [];
+    for (const m of this.measurements.values()) {
+      const cutoff = now - MEASURE_WINDOW_MS;
+      for (const [seed, at] of m.seeds) if (at < cutoff) m.seeds.delete(seed);
+      const liveNow = now - m.lastAt <= LIVE_TIMEOUT_MS;
+      if (liveNow) {
+        const span = Math.max(500, Math.min(MEASURE_WINDOW_MS, now - m.firstAt));
+        const n = m.seeds.size;
+        m.last = (n * m.profile.blockSize) / (span / 1000);
+        m.codesPerSecond = n / (span / 1000);
+        if (now - m.firstAt >= 1000) m.best = Math.max(m.best, m.last);
+      } else {
+        m.last = 0;
+        m.codesPerSecond = 0;
+      }
+      rows.push({
+        key: m.key,
+        label: m.label,
+        named: m.named,
+        profile: m.profile,
+        nominal: nominalBytesPerSecond(m.profile),
+        best: m.best,
+        last: m.last,
+        live: liveNow,
+        sweepReceived: Math.min(m.uniqueTotal, m.sweepSent || m.uniqueTotal),
+        sweepSent: m.sweepSent,
+      });
+    }
+    rows.sort((a, b) => b.best - a.best || b.last - a.last);
+    this.ranking.set(rows);
+    const current = this.measurements.get(this.currentKey);
+    this.live.set(
+      current && now - current.lastAt <= LIVE_TIMEOUT_MS
+        ? {
+            label: current.label,
+            bytesPerSecond: current.last,
+            codesPerSecond: current.codesPerSecond,
+            nominal: nominalBytesPerSecond(current.profile),
+          }
+        : null,
+    );
+  }
+
+  // --- pomiar koloru: próbka ----------------------------------------------------
+
   private async measureColor(video: HTMLVideoElement, scanner: QrScanner): Promise<void> {
     if (video.readyState < 2 || !video.videoWidth) return;
     const maxWidth = this.resolution();
@@ -552,59 +719,7 @@ export class Receive implements OnInit, OnDestroy {
     }
   }
 
-  /** Silnik natywny nie oddaje bajtów; przy ramkach binarnych przełącza się na ZXing. */
-  private switchToWasm(): void {
-    if (this.preferredEngine() === 'wasm') return;
-    this.unreadableStreak = 0;
-    this.notice.set('Silnik natywny nie czyta tych kodów (ramki binarne). Przełączam dekoder na ZXing WebAssembly.');
-    this.preferredEngine.set('wasm');
-    void this.start();
-  }
-
-  private handleCalibration(header: FrameHeader): void {
-    if (header.dataLength !== CALIBRATION_TABLE_VERSION) {
-      this.error.set('Nadajnik ma inną wersję tabeli kalibracji. Zaktualizuj aplikację po obu stronach.');
-      return;
-    }
-    const profile = CALIBRATION_PROFILES[header.fileId];
-    if (!profile || header.blockSize !== profile.blockSize) return;
-    const now = performance.now();
-    let entry = this.calibration.get(header.fileId);
-    if (!entry) {
-      entry = { seen: new Set(), firstAt: now, lastAt: now };
-      this.calibration.set(header.fileId, entry);
-    }
-    entry.seen.add(header.seed);
-    entry.lastAt = now;
-    this.lastCalibrationAt.set(now);
-    this.calibrationCurrent.set(profileName(profile) ?? '');
-    if (!this.calibrationDirty) {
-      this.calibrationDirty = true;
-      setTimeout(() => {
-        this.calibrationDirty = false;
-        this.publishCalibration();
-      }, 200);
-    }
-  }
-
-  private publishCalibration(): void {
-    const rows: CalibrationRow[] = [];
-    for (const [index, entry] of this.calibration) {
-      const profile = CALIBRATION_PROFILES[index];
-      const sent = calibrationCodes(profile);
-      const received = Math.min(entry.seen.size, sent);
-      rows.push({
-        index,
-        name: profileName(profile) ?? `#${index}`,
-        profile,
-        received,
-        sent,
-        bytesPerSecond: (received * profile.blockSize) / (CALIBRATION_MS / 1000),
-      });
-    }
-    rows.sort((a, b) => b.bytesPerSecond - a.bytesPerSecond || a.index - b.index);
-    this.calibrationRows.set(rows);
-  }
+  // --- transfer -----------------------------------------------------------------
 
   private beginTransfer(header: FrameHeader): void {
     this.revokeResult();
@@ -660,6 +775,7 @@ export class Receive implements OnInit, OnDestroy {
     this.startedAt = performance.now();
     this.clock = setInterval(() => {
       this.elapsed.set((performance.now() - this.startedAt) / 1000);
+      this.updateMeasurements();
     }, 250);
   }
 
