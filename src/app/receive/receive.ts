@@ -22,6 +22,13 @@ import {
   type Profile,
 } from '../core/profile';
 import { decodeWire, looksLikeBinaryFrame, type ScanHit } from '../core/wire';
+import {
+  analyzeColorTest,
+  buildTestCard,
+  parseColorTestModules,
+  type ColorTestResult,
+  type Corners,
+} from '../core/colortest';
 import { createQrScanner, type QrScanner, type ScanEngine } from '../scan/qr-scanner';
 
 interface ScanStats {
@@ -72,6 +79,16 @@ const RESOLUTIONS = [
 export class Receive implements OnInit, OnDestroy {
   readonly formatBytes = formatBytes;
   readonly resolutions = RESOLUTIONS;
+  readonly channelNames = ['R', 'G', 'B'];
+  readonly stripeWidths = [1, 2, 3, 4];
+
+  stripeContrast(result: ColorTestResult, kind: 'luma' | 'chroma', width: number): number {
+    return result.stripes.find((s) => s.kind === kind && s.width === width)?.contrast ?? 0;
+  }
+
+  rgbCss(c: { r: number; g: number; b: number }): string {
+    return `rgb(${Math.round(c.r)},${Math.round(c.g)},${Math.round(c.b)})`;
+  }
 
   readonly cameras = signal<MediaDeviceInfo[]>([]);
   readonly selectedCamera = signal('');
@@ -90,6 +107,10 @@ export class Receive implements OnInit, OnDestroy {
   readonly lastCodeAt = signal(0);
   readonly calibrationRows = signal<CalibrationRow[]>([]);
   readonly calibrationCurrent = signal('');
+  readonly colorTesting = signal(false);
+  readonly colorResult = signal<ColorTestResult | null>(null);
+  readonly colorError = signal('');
+  readonly colorSamples = signal(0);
 
   readonly progress = computed(() => {
     const t = this.transfer();
@@ -117,6 +138,8 @@ export class Receive implements OnInit, OnDestroy {
   private loopToken = 0;
   private readonly calibration = new Map<number, CalibrationEntry>();
   private calibrationDirty = false;
+  private readonly colorCanvas = document.createElement('canvas');
+  private readonly colorCard = buildTestCard();
 
   async ngOnInit(): Promise<void> {
     await this.refreshCameras();
@@ -216,6 +239,37 @@ export class Receive implements OnInit, OnDestroy {
     if (text) await navigator.clipboard.writeText(text);
   }
 
+  toggleColorTest(): void {
+    this.colorTesting.update((v) => !v);
+    this.colorResult.set(null);
+    this.colorError.set('');
+    this.colorSamples.set(0);
+  }
+
+  async copyColorResult(): Promise<void> {
+    const r = this.colorResult();
+    if (!r) return;
+    const payload = {
+      engine: this.engine(),
+      resolution: this.resolution(),
+      userAgent: navigator.userAgent,
+      verdict: r.verdict,
+      margins: r.margins,
+      crosstalk: r.crosstalk.map((row) => row.map((v) => Number(v.toFixed(3)))),
+      stripes: r.stripes.map((s) => ({ ...s, contrast: Number(s.contrast.toFixed(3)) })),
+      patches: r.patches.map((p) => ({
+        key: p.key,
+        measured: { r: Math.round(p.measured.r), g: Math.round(p.measured.g), b: Math.round(p.measured.b) },
+      })),
+    };
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
+      this.notice.set('Wynik pomiaru skopiowany jako JSON.');
+    } catch {
+      this.notice.set('Nie udało się skopiować do schowka.');
+    }
+  }
+
   async copyName(name: string): Promise<void> {
     try {
       await navigator.clipboard.writeText(name);
@@ -227,6 +281,12 @@ export class Receive implements OnInit, OnDestroy {
 
   private async loop(token: number, video: HTMLVideoElement): Promise<void> {
     while (token === this.loopToken && this.scanner) {
+      if (this.colorTesting()) {
+        await this.measureColor(video, this.scanner);
+        if (token !== this.loopToken) return;
+        await new Promise((r) => setTimeout(r, 150));
+        continue;
+      }
       let hits: ScanHit[] = [];
       try {
         hits = await this.scanner.scan(video);
@@ -274,6 +334,44 @@ export class Receive implements OnInit, OnDestroy {
       this.decoded.set(decoder.decodedCount);
       this.scheduleGrid();
       if (decoder.isComplete) this.finish(frame.header, decoder);
+    }
+  }
+
+  /** Jedna próbka pomiaru koloru: klatka → pozycja kodu kotwiczącego → analiza pól i pasków. */
+  private async measureColor(video: HTMLVideoElement, scanner: QrScanner): Promise<void> {
+    if (video.readyState < 2 || !video.videoWidth) return;
+    const maxWidth = this.resolution();
+    const ratio = Math.min(1, maxWidth / video.videoWidth);
+    const width = Math.round(video.videoWidth * ratio);
+    const height = Math.round(video.videoHeight * ratio);
+    if (this.colorCanvas.width !== width || this.colorCanvas.height !== height) {
+      this.colorCanvas.width = width;
+      this.colorCanvas.height = height;
+    }
+    const ctx = this.colorCanvas.getContext('2d', { willReadFrequently: true })!;
+    ctx.drawImage(video, 0, 0, width, height);
+    const image = ctx.getImageData(0, 0, width, height);
+    try {
+      const hits = await scanner.scanImage(image);
+      const anchor = hits.find((h) => parseColorTestModules(h.text) !== null && h.corners?.length === 4);
+      if (!anchor) {
+        this.colorError.set(
+          'Nie widzę karty testowej. Skieruj kamerę na „Kartę koloru” z nadajnika (cała karta w kadrze).',
+        );
+        return;
+      }
+      const modules = parseColorTestModules(anchor.text)!;
+      if (modules !== this.colorCard.modules) {
+        this.colorError.set('Karta z innej wersji aplikacji.');
+        return;
+      }
+      const corners = anchor.corners as Corners;
+      this.colorResult.set(analyzeColorTest(image, corners, this.colorCard));
+      this.colorSamples.update((n) => n + 1);
+      this.colorError.set('');
+      this.lastCodeAt.set(performance.now());
+    } catch (err) {
+      this.colorError.set(this.describeError(err));
     }
   }
 

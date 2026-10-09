@@ -87,6 +87,43 @@ w praktyce liczy się, ile kodów kamera realnie dekoduje. Zamiast zgadywać, ur
 Odbiornik pokazuje też na żywo klatki/s, kody/s i ETA oraz pozwala wybrać rozdzielczość przechwytywania
 (720p/1080p/4K).
 
+## Multipleksowanie w kolorze: research i pomiar
+
+Pomysł: trzy niezależne kody QR w kanałach R, G i B jednej klatki (3× danych w tym samym miejscu).
+Literatura i istniejące projekty mówią, że to działa, ale z dwoma zastrzeżeniami, które decydują o wyniku
+na konkretnym sprzęcie:
+
+1. **Przenikanie kanałów** (crosstalk). Filtry Bayera w kamerze i prymarne barwy ekranu nachodzą na siebie
+   widmowo, więc kanał G widzi część czerwieni itd. Wprost podane kanały R/G/B dekodują się źle; potrzebna
+   jest normalizacja czernią i bielą oraz ewentualnie odwrócenie macierzy 3×3. libcimbar z tego powodu zszedł
+   z 8 do 4 kolorów (2 bity na kafelek), JAB Code (ISO/IEC 23634) używa 4 lub 8 kolorów z paletą wzorcową w symbolu.
+2. **Podpróbkowanie chrominancji**. Tor kamery w Androidzie (i większość kodeków wideo) oddaje obraz jako
+   YCbCr 4:2:0: jedna próbka koloru na 4 piksele luminancji. Czarno-białe kody tego nie czują, kolorowe tak:
+   moduł niosący dane w kolorze musi być ok. 2× większy niż moduł czarno-biały. Trzy kody w kolorze × 4× większe
+   moduły to w najgorszym razie **mniej** danych niż jeden kod czarno-biały. Na szczęście nie każdy tor
+   podpróbkowuje: `getUserMedia` na laptopie często daje pełny kolor, a telefon z kamerą 4K ma zapas.
+
+Zamiast zgadywać, aplikacja ma **pomiar** (nadajnik: *Karta koloru*, odbiornik: *Pomiar koloru*):
+
+- karta = czarno-biały kod QR jako kotwica geometryczna + pola K/R/G/B/C/M/Y/W + paski luminancji i
+  chrominancji o szerokości 1–4 modułów (niebieski vs szary o tej samej luminancji);
+- odbiornik z narożników kodu liczy homografię, próbkuje pola i raportuje: **marginesy separacji** R/G/B po
+  normalizacji czernią i bielą (ile zostaje na próg; ≥ 0,35 dobrze, < 0,15 bez szans), **macierz przenikania**
+  oraz **kontrast pasków** luminancji vs chrominancji dla każdej szerokości. Jeśli paski chrominancji gasną
+  szybciej niż luminancji, tor podpróbkowuje kolor i wiadomo, o ile większe muszą być moduły;
+- *Kopiuj wynik (JSON)* daje surowe liczby do dalszej analizy.
+
+Decyzja o wdrożeniu kodowania kolorowego (najprościej: 3 kody w kanałach z dekodowaniem per kanał przez ZXing
+po normalizacji) zapada po pomiarze na docelowym sprzęcie. Na tej podstawie wiadomo, czy realny zysk to
+3×, 1,5× czy nic.
+
+Źródła: [libcimbar ABOUT](https://github.com/sz3/cimbar/blob/master/ABOUT.md),
+[JAB Code / ISO/IEC 23634](https://en.wikipedia.org/wiki/JAB_Code),
+[Channel-wise barcodes for color display (Dinesh, Sharma)](https://hajim.rochester.edu/ece/sites/gsharma/papers/DineshChlwiseBarcodesColorDisplayJEI2019.pdf),
+[Robust decoding of high-capacity color QR (HiQ)](https://arxiv.org/pdf/1704.06447),
+[Colour multiplexing of QR codes (André 2014)](https://ietresearch.onlinelibrary.wiley.com/doi/full/10.1049/el.2014.2501),
+[Android ImageFormat YUV_420_888](https://developer.android.com/reference/android/graphics/ImageFormat).
+
 ## Rozwój
 
 ```bash

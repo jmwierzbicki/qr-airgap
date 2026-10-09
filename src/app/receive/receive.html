@@ -37,6 +37,11 @@
         <button type="button" class="danger" (click)="stop()">Stop</button>
       }
       <button type="button" (click)="reset()">Wyczyść</button>
+      @if (running()) {
+        <button type="button" [class.primary]="colorTesting()" (click)="toggleColorTest()">
+          {{ colorTesting() ? 'Zakończ pomiar koloru' : 'Pomiar koloru' }}
+        </button>
+      }
     </div>
   </div>
 
@@ -57,6 +62,75 @@
     }
   </div>
 </section>
+
+@if (colorTesting()) {
+  <section class="panel">
+    <h2>Pomiar koloru (eksperyment)</h2>
+    <p class="hint">
+      Na nadajniku wciśnij „Karta koloru”. Ustaw kamerę tak, żeby cała karta (kod + pola + paski) była w kadrze
+      i ostra. Pomiar odświeża się na bieżąco; wynik mówi, czy multipleksowanie w kolorze ma na tym sprzęcie sens.
+    </p>
+    @if (colorError()) {
+      <p class="error">{{ colorError() }}</p>
+    }
+    @if (colorResult(); as c) {
+      <div class="result" [class.warn]="c.verdict !== 'good'">
+        <h3>
+          {{ c.verdict === 'good' ? 'Kolor nadaje się do multipleksu' : c.verdict === 'marginal' ? 'Kolor na granicy' : 'Kolor nie nadaje się' }}
+          <small>(próbka {{ colorSamples() }})</small>
+        </h3>
+        <p>{{ c.summary }}</p>
+        <button type="button" (click)="copyColorResult()">Kopiuj wynik (JSON)</button>
+      </div>
+      <div class="color-grid">
+        <div>
+          <h4>Marginesy separacji (1 = idealnie)</h4>
+          <table class="calibration">
+            <tr><th>R</th><th>G</th><th>B</th></tr>
+            <tr>
+              <td>{{ c.margins.r | number: '1.2-2' }}</td>
+              <td>{{ c.margins.g | number: '1.2-2' }}</td>
+              <td>{{ c.margins.b | number: '1.2-2' }}</td>
+            </tr>
+          </table>
+          <h4>Przenikanie: odpowiedź kanału na czyste pole</h4>
+          <table class="calibration">
+            <tr><th></th><th>pole R</th><th>pole G</th><th>pole B</th></tr>
+            @for (row of c.crosstalk; track $index) {
+              <tr>
+                <th>kanał {{ channelNames[$index] }}</th>
+                @for (v of row; track $index) {
+                  <td>{{ v * 100 | number: '1.0-0' }}%</td>
+                }
+              </tr>
+            }
+          </table>
+        </div>
+        <div>
+          <h4>Kontrast pasków (szerokość w modułach)</h4>
+          <table class="calibration">
+            <tr><th>moduły</th><th>luminancja</th><th>chrominancja</th></tr>
+            @for (w of stripeWidths; track w) {
+              <tr>
+                <th>{{ w }}</th>
+                <td>{{ stripeContrast(c, 'luma', w) * 100 | number: '1.0-0' }}%</td>
+                <td>{{ stripeContrast(c, 'chroma', w) * 100 | number: '1.0-0' }}%</td>
+              </tr>
+            }
+          </table>
+          <h4>Pola (zmierzone)</h4>
+          <div class="swatches">
+            @for (p of c.patches; track p.key) {
+              <div class="swatch" [style.background]="rgbCss(p.measured)" [title]="p.key + ': ' + rgbCss(p.measured)">
+                {{ p.key }}
+              </div>
+            }
+          </div>
+        </div>
+      </div>
+    }
+  </section>
+}
 
 @if (calibrationRows().length) {
   <section class="panel">

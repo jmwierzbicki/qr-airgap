@@ -26,6 +26,7 @@ export type ScanWorkerRequest = ScanWorkerInit | ScanWorkerFrame;
 export interface ScanWorkerHit {
   text: string;
   bytes: Uint8Array;
+  corners: { x: number; y: number }[];
 }
 
 export interface ScanWorkerResult {
@@ -77,7 +78,13 @@ addEventListener('message', async (event: MessageEvent<ScanWorkerRequest>) => {
       const results = await readBarcodes(image, readerOptions);
       const hits: ScanWorkerHit[] = results
         .filter((r) => r.isValid)
-        .map((r) => ({ text: r.text, bytes: r.bytes.slice() }));
+        .map((r) => ({
+          text: r.text,
+          bytes: r.bytes.slice(),
+          corners: [r.position.topLeft, r.position.topRight, r.position.bottomRight, r.position.bottomLeft].map(
+            (p) => ({ x: p.x, y: p.y }),
+          ),
+        }));
       reply(
         { type: 'result', id: request.id, hits },
         hits.map((h) => h.bytes.buffer as ArrayBuffer),

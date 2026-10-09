@@ -121,11 +121,17 @@
       <button type="button" (click)="startCalibration()" title="Przelatuje po {{ profileNames.length }} profilach, ok. {{ calibrationTotalSeconds }} s">
         Kalibracja ({{ calibrationTotalSeconds }} s)
       </button>
+      <button type="button" (click)="startColorTest()" title="Statyczna karta do pomiaru koloru na odbiorniku (eksperyment)">
+        Karta koloru
+      </button>
     } @else {
       <button type="button" class="danger" (click)="stop()">Stop</button>
     }
     <button type="button" [disabled]="!running()" (click)="toggleFullscreen()">Pełny ekran</button>
-    @if (running() && !calibrating()) {
+    @if (colorTesting()) {
+      <span class="status">Karta testowa koloru. Na odbiorniku włącz „Pomiar koloru”.</span>
+    }
+    @if (running() && !calibrating() && !colorTesting()) {
       <span class="status">
         QR v{{ qrVersion() }} ({{ qrModules() }}×{{ qrModules() }}), ramka {{ frameBytes() }} B,
         wysłano {{ framesSent() }} kodów
@@ -153,7 +159,7 @@
     }
   </div>
 
-  @if (running()) {
+  @if (running() && !colorTesting()) {
     <div class="progress" [title]="calibrating() ? 'Postęp kalibracji' : 'Postęp pierwszego (systematycznego) cyklu'">
       <div class="bar" [style.width.%]="calibrating() ? calibrationProgress() : cycleProgress()"></div>
     </div>

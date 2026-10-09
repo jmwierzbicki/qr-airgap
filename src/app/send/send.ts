@@ -27,6 +27,13 @@ import {
   type Profile,
 } from '../core/profile';
 import { encodeWire } from '../core/wire';
+import {
+  COLOR_TEST_MODULES,
+  COLOR_TEST_QR_VERSION,
+  buildTestCard,
+  colorTestText,
+  paintTestCard,
+} from '../core/colortest';
 
 interface PreparedPayload {
   name: string;
@@ -69,6 +76,7 @@ export class Send implements OnDestroy {
   readonly ecLevel = signal<EcLevel>('L');
   readonly running = signal(false);
   readonly calibrating = signal(false);
+  readonly colorTesting = signal(false);
   readonly calibrationIndex = signal(0);
   readonly framesSent = signal(0);
   readonly qrVersion = signal(0);
@@ -236,6 +244,17 @@ export class Send implements OnDestroy {
     this.enterCalibrationProfile(0);
   }
 
+  /** Statyczna karta testowa do pomiaru koloru po stronie odbiornika. */
+  startColorTest(): void {
+    this.stop();
+    this.error.set('');
+    this.notice.set('');
+    this.colorTesting.set(true);
+    this.running.set(true);
+    this.observeStage();
+    this.drawColorCard();
+  }
+
   stop(): void {
     if (this.timer) {
       clearInterval(this.timer);
@@ -245,6 +264,7 @@ export class Send implements OnDestroy {
     this.resizeObserver = null;
     this.running.set(false);
     this.calibrating.set(false);
+    this.colorTesting.set(false);
   }
 
   async toggleFullscreen(): Promise<void> {
@@ -266,7 +286,7 @@ export class Send implements OnDestroy {
   }
 
   private restartIfRunning(): void {
-    if (this.calibrating()) return;
+    if (this.calibrating() || this.colorTesting()) return;
     if (this.running()) this.start();
   }
 
@@ -460,8 +480,59 @@ export class Send implements OnDestroy {
     const stage = this.stageRef()?.nativeElement;
     if (!stage || typeof ResizeObserver === 'undefined') return;
     this.resizeObserver?.disconnect();
-    this.resizeObserver = new ResizeObserver(() => this.fitScale());
+    this.resizeObserver = new ResizeObserver(() => {
+      if (this.colorTesting()) this.drawColorCard();
+      else this.fitScale();
+    });
     this.resizeObserver.observe(stage);
+  }
+
+  private drawColorCard(): void {
+    const canvas = this.canvasRef()?.nativeElement;
+    const stage = this.stageRef()?.nativeElement;
+    if (!canvas || !stage) return;
+    const card = buildTestCard();
+    const quiet = 4;
+    const cols = card.width + 2 * quiet;
+    const rows = card.height + 2 * quiet;
+    const availW = stage.clientWidth - 16;
+    const availH = (stage.clientHeight || stage.clientWidth) - 16;
+    const scale = Math.max(1, Math.floor(Math.min(availW / cols, availH / rows)));
+    canvas.width = cols * scale;
+    canvas.height = rows * scale;
+    const ctx = canvas.getContext('2d')!;
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    try {
+      const code = QRCode.create(colorTestText(), {
+        version: COLOR_TEST_QR_VERSION,
+        errorCorrectionLevel: 'M',
+      });
+      const size = code.modules.size;
+      if (size !== COLOR_TEST_MODULES) throw new Error(`Nieoczekiwany rozmiar kodu: ${size}`);
+      ctx.fillStyle = '#000';
+      for (let y = 0; y < size; y++) {
+        for (let x = 0; x < size; x++) {
+          if (code.modules.data[y * size + x]) {
+            ctx.fillRect((quiet + x) * scale, (quiet + y) * scale, scale, scale);
+          }
+        }
+      }
+    } catch (err) {
+      this.error.set(String(err));
+      this.stop();
+      return;
+    }
+
+    paintTestCard(card, {
+      fillRect: (x, y, w, h, color) => {
+        ctx.fillStyle = `rgb(${color.r},${color.g},${color.b})`;
+        ctx.fillRect((quiet + x) * scale, (quiet + y) * scale, w * scale, h * scale);
+      },
+    });
+    this.qrVersion.set(COLOR_TEST_QR_VERSION);
+    this.qrModules.set(COLOR_TEST_MODULES);
   }
 }
 

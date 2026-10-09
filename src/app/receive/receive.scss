@@ -152,3 +152,43 @@
     text-decoration: underline;
   }
 }
+
+.result.warn {
+  background: #fffbeb;
+  border-color: #fcd34d;
+}
+
+.color-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 1rem;
+  margin-top: 1rem;
+
+  h4 {
+    margin: 0.75rem 0 0.25rem;
+    font-size: 0.9rem;
+    color: var(--muted);
+  }
+
+  .calibration {
+    margin-top: 0;
+  }
+}
+
+.swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+
+  .swatch {
+    width: 44px;
+    height: 44px;
+    display: grid;
+    place-items: center;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-weight: 700;
+    color: #fff;
+    text-shadow: 0 0 3px #000;
+  }
+}

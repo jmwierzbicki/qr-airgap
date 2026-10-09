@@ -13,6 +13,8 @@ import { decodeFrame, encodeFrame, type Frame } from './frame';
 export interface ScanHit {
   text: string;
   bytes?: Uint8Array;
+  /** Narożniki symbolu w pikselach obrazu: TL, TR, BR, BL (orientacja symbolu). */
+  corners?: { x: number; y: number }[];
 }
 
 export function encodeWire(frame: Frame, binary: boolean): Uint8Array {

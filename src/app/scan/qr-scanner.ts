@@ -15,6 +15,7 @@ export type ScanEngine = 'native' | 'wasm';
 interface DetectedBarcodeLike {
   rawValue: string;
   format: string;
+  cornerPoints?: { x: number; y: number }[];
 }
 
 interface BarcodeDetectorLike {
@@ -30,6 +31,8 @@ export interface QrScanner {
   readonly engine: ScanEngine;
   readonly supportsBinary: boolean;
   scan(video: HTMLVideoElement): Promise<ScanHit[]>;
+  /** Dekoduje gotową klatkę (obraz zostaje u wywołującego, np. do analizy kolorów). */
+  scanImage(image: ImageData): Promise<ScanHit[]>;
   destroy(): void;
 }
 
@@ -52,8 +55,18 @@ class NativeScanner implements QrScanner {
 
   async scan(video: HTMLVideoElement): Promise<ScanHit[]> {
     if (video.readyState < 2) return [];
-    const found = await this.detector.detect(video);
-    return found.map((b) => ({ text: b.rawValue }));
+    return this.toHits(await this.detector.detect(video));
+  }
+
+  async scanImage(image: ImageData): Promise<ScanHit[]> {
+    return this.toHits(await this.detector.detect(image));
+  }
+
+  private toHits(found: DetectedBarcodeLike[]): ScanHit[] {
+    return found.map((b) => ({
+      text: b.rawValue,
+      corners: b.cornerPoints?.length === 4 ? b.cornerPoints.map((p) => ({ x: p.x, y: p.y })) : undefined,
+    }));
   }
 
   destroy(): void {}
@@ -115,17 +128,19 @@ class WasmScanner implements QrScanner {
     }
     this.ctx.drawImage(video, 0, 0, width, height);
     const image = this.ctx.getImageData(0, 0, width, height);
+    return this.post(image.width, image.height, image.data.buffer as ArrayBuffer);
+  }
+
+  scanImage(image: ImageData): Promise<ScanHit[]> {
+    return this.post(image.width, image.height, image.data.buffer.slice(0) as ArrayBuffer);
+  }
+
+  private post(width: number, height: number, buffer: ArrayBuffer): Promise<ScanHit[]> {
     const id = this.nextId++;
     return new Promise((resolve) => {
       this.waiting.set(id, resolve);
-      const request: ScanWorkerRequest = {
-        type: 'frame',
-        id,
-        width,
-        height,
-        buffer: image.data.buffer as ArrayBuffer,
-      };
-      this.worker.postMessage(request, [request.buffer]);
+      const request: ScanWorkerRequest = { type: 'frame', id, width, height, buffer };
+      this.worker.postMessage(request, [buffer]);
     });
   }
 
