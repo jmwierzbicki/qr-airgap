@@ -11,7 +11,7 @@ import {
   profileIndex,
   profileName,
 } from './profile';
-import { decodeWire, encodeWire, looksLikeBinaryFrame } from './wire';
+import { decodeWire, diagnoseWire, encodeWire, looksLikeBinaryFrame } from './wire';
 
 describe('profiles', () => {
   it('every calibration profile has a unique, resolvable name', () => {
@@ -85,5 +85,16 @@ describe('wire', () => {
     expect(decodeWire({ text: 'garbage', bytes: bin })).toEqual(frame);
     expect(looksLikeBinaryFrame(utf8Decode(bin))).toBe(true);
     expect(decodeWire({ text: utf8Decode(bin) })).toBeNull();
+  });
+
+  it('diagnoses why a hit cannot be decoded', () => {
+    const bin = encodeWire(frame, true);
+    expect(diagnoseWire({ text: 'https://example.com' })).toBe('not-ours');
+    expect(diagnoseWire({ text: '' })).toBe('binary-as-text');
+    expect(diagnoseWire({ text: utf8Decode(bin) })).toBe('binary-as-text');
+    const old = encodeWire(frame, true);
+    old[2] = 1;
+    expect(diagnoseWire({ text: 'x', bytes: old })).toBe('version');
+    expect(diagnoseWire({ text: utf8Decode(encodeWire({ ...frame }, false)).replace(/^RlE/, 'RlEB') })).toBe('not-ours');
   });
 });

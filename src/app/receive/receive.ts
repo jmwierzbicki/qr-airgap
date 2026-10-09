@@ -28,7 +28,8 @@ import {
   profileName,
   type Profile,
 } from '../core/profile';
-import { decodeWire, looksLikeBinaryFrame, type ScanHit } from '../core/wire';
+import { decodeWire, diagnoseWire, type ScanHit } from '../core/wire';
+import { FRAME_VERSION } from '../core/frame';
 import { FEEDBACK_INTERVAL_MS, FEEDBACK_MAX_MISSING, encodeFeedback, transferIdOf } from '../core/feedback';
 import { AudioFeedbackPlayer, FEEDBACK_PROTOCOLS, type FeedbackProtocol } from '../audio/ggwave';
 import { createQrScanner, type QrScanner, type ScanEngine } from '../scan/qr-scanner';
@@ -159,6 +160,7 @@ export class Receive implements OnInit, OnDestroy {
   private readonly colorCard = buildTestCard();
   private frameCounter = 0;
   private colorIdle = 0;
+  private unreadableStreak = 0;
   private player: AudioFeedbackPlayer | null = null;
   private feedbackTimer: ReturnType<typeof setInterval> | null = null;
   private codeTimes: number[] = [];
@@ -469,11 +471,21 @@ export class Receive implements OnInit, OnDestroy {
     const frame = decodeWire(hit);
     if (!frame) {
       this.stats.update((s) => ({ ...s, invalid: s.invalid + 1 }));
-      if (!hit.bytes && looksLikeBinaryFrame(hit.text) && this.engine() === 'native') {
-        this.switchToWasm();
+      const problem = diagnoseWire(hit);
+      if (problem === 'version') {
+        this.error.set(
+          `Nadajnik używa innej wersji formatu ramki (ta aplikacja: v${FRAME_VERSION}). Odśwież stronę na obu urządzeniach (czasem dwa razy, aż stopka pokaże tę samą wersję).`,
+        );
+        return;
+      }
+      if (this.engine() === 'native') {
+        // BarcodeDetector nie oddaje bajtów: ramki binarne wracają jako pusty lub zniekształcony tekst.
+        this.unreadableStreak++;
+        if (problem === 'binary-as-text' || this.unreadableStreak >= 3) this.switchToWasm();
       }
       return;
     }
+    this.unreadableStreak = 0;
     this.lastCodeAt.set(performance.now());
 
     if (frame.header.flags & FLAG_CALIBRATION) {
@@ -542,7 +554,9 @@ export class Receive implements OnInit, OnDestroy {
 
   /** Silnik natywny nie oddaje bajtów; przy ramkach binarnych przełącza się na ZXing. */
   private switchToWasm(): void {
-    this.notice.set('Nadajnik używa kodowania binarnego. Przełączam dekoder na ZXing WebAssembly.');
+    if (this.preferredEngine() === 'wasm') return;
+    this.unreadableStreak = 0;
+    this.notice.set('Silnik natywny nie czyta tych kodów (ramki binarne). Przełączam dekoder na ZXing WebAssembly.');
     this.preferredEngine.set('wasm');
     void this.start();
   }

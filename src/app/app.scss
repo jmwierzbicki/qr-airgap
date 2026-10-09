@@ -48,3 +48,15 @@ footer {
   color: var(--muted);
   font-size: 0.85rem;
 }
+
+.update {
+  margin: 0;
+  padding: 0.5rem 1rem;
+  text-align: center;
+  color: #fff;
+  background: var(--accent);
+}
+
+.version {
+  font-variant-numeric: tabular-nums;
+}

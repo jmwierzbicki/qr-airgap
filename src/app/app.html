@@ -6,10 +6,16 @@
   </nav>
 </header>
 
+@if (updating()) {
+  <p class="update">Nowa wersja aplikacji, przeładowuję…</p>
+}
+
 <main>
   <router-outlet />
 </main>
 
 <footer>
   Transfer plików przez ekran i kamerę: kod fontannowy LT + animowane kody QR. Działa bez sieci.
+  <br />
+  <span class="version" title="Obie strony muszą mieć tę samą wersję ramki i tabeli">{{ version }}</span>
 </footer>

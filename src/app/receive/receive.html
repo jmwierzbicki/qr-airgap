@@ -254,6 +254,12 @@
       Odbiór zaczyna się automatycznie po rozpoznaniu pierwszego kodu, kolejność nie ma znaczenia.
       Jeśli nadajnik uruchomi kalibrację, pojawi się tu ranking profili.
     </p>
+    @if (running() && stats().invalid > 0) {
+      <p class="hint notice">
+        Kamera widzi kody ({{ stats().invalid }} odczytów), ale nie są to ramki tej wersji aplikacji.
+        Sprawdź, czy obie strony mają tę samą wersję w stopce, i czy silnik dekodera to ZXing.
+      </p>
+    }
   }
 
   <canvas #grid class="grid" title="Mapa bloków: zielone = odebrane"></canvas>
