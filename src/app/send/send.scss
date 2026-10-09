@@ -105,3 +105,26 @@
 .notice {
   color: #1d4ed8;
 }
+
+.feedback {
+  margin-top: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+
+  summary {
+    cursor: pointer;
+    font-weight: 600;
+  }
+
+  .row {
+    margin-top: 0.5rem;
+  }
+}
+
+.check {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.9rem;
+}

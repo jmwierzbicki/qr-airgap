@@ -32,6 +32,11 @@
                 "glob": "zxing_reader.wasm",
                 "input": "node_modules/zxing-wasm/dist/reader",
                 "output": "zxing"
+              },
+              {
+                "glob": "ggwave.js",
+                "input": "node_modules/ggwave",
+                "output": "ggwave"
               }
             ],
             "styles": [

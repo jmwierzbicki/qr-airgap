@@ -22,7 +22,8 @@
  */
 
 export const FRAME_MAGIC = 0x4651;
-export const FRAME_VERSION = 1;
+/** v2: numer kropli niesie w górnych 8 bitach podpowiedź stopnia (kanał zwrotny). */
+export const FRAME_VERSION = 2;
 export const HEADER_SIZE = 26;
 export const FLAG_GZIP = 0b01;
 export const FLAG_CALIBRATION = 0b10;

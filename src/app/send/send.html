@@ -143,8 +143,8 @@
     }
     @if (running() && !calibrating() && !colorTesting()) {
       <span class="status">
-        QR v{{ qrVersion() }} ({{ qrModules() }}×{{ qrModules() }}), ramka {{ frameBytes() }} B,
-        wysłano {{ framesSent() }} kodów
+        Transfer #{{ transferId().toString(16) }}, QR v{{ qrVersion() }} ({{ qrModules() }}×{{ qrModules() }}),
+        ramka {{ frameBytes() }} B, wysłano {{ framesSent() }} kodów
       </span>
     }
     @if (calibrating()) {
@@ -158,6 +158,33 @@
   @if (error()) {
     <p class="error">{{ error() }}</p>
   }
+
+  <details class="feedback" [open]="listening()">
+    <summary>Kanał zwrotny (dźwięk), opcjonalny</summary>
+    <p class="hint">
+      Odbiornik gra głośnikiem krótkie raporty, nadajnik słucha mikrofonem: zatrzymuje się po komplecie,
+      dosyła dokładnie brakujące bloki i może regulować tempo. Na odbiorniku włącz „Kanał zwrotny” w sekcji kamery.
+    </p>
+    <div class="row">
+      @if (!listening()) {
+        <button type="button" (click)="startListening()">Nasłuchuj odbiornika</button>
+      } @else {
+        <button type="button" class="danger" (click)="stopListening()">Wyłącz nasłuch</button>
+      }
+      <label class="check"><input type="checkbox" [checked]="autoStop()" (change)="onAutoStop($event)" /> auto-stop po komplecie</label>
+      <label class="check"><input type="checkbox" [checked]="rateControl()" (change)="onRateControl($event)" /> reguluj fps wg odbioru</label>
+    </div>
+    @if (listeningStatus()) {
+      <p class="hint">{{ listeningStatus() }}</p>
+    }
+    @if (lastReport(); as r) {
+      <p class="hint notice">
+        Odbiornik: {{ r.decoded }}/{{ r.blockCount }} bloków, {{ r.recentCodes }} kodów w ostatnim oknie
+        ({{ reportAgeSeconds() | number: '1.0-0' }} s temu, raportów: {{ reportsReceived() }})
+        {{ r.complete ? '· komplet' : '' }}
+      </p>
+    }
+  </details>
 
   <div class="stage" #stage [class.active]="running()">
     <canvas #canvas></canvas>

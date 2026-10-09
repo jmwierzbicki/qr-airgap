@@ -29,6 +29,8 @@ import {
   type Profile,
 } from '../core/profile';
 import { decodeWire, looksLikeBinaryFrame, type ScanHit } from '../core/wire';
+import { FEEDBACK_INTERVAL_MS, FEEDBACK_MAX_MISSING, encodeFeedback, transferIdOf } from '../core/feedback';
+import { AudioFeedbackPlayer, FEEDBACK_PROTOCOLS, type FeedbackProtocol } from '../audio/ggwave';
 import { createQrScanner, type QrScanner, type ScanEngine } from '../scan/qr-scanner';
 
 interface ScanStats {
@@ -108,6 +110,12 @@ export class Receive implements OnInit, OnDestroy {
   readonly calibrationRows = signal<CalibrationRow[]>([]);
   readonly calibrationCurrent = signal('');
   readonly lastCalibrationAt = signal(0);
+  readonly feedbackProtocols = FEEDBACK_PROTOCOLS;
+  readonly feedbackEnabled = signal(false);
+  readonly feedbackProtocol = signal<FeedbackProtocol>('audible-fast');
+  readonly feedbackVolume = signal(50);
+  readonly feedbackStatus = signal('');
+  readonly feedbackSent = signal(0);
   readonly colorTesting = signal(false);
   readonly colorResult = signal<ColorTestResult | null>(null);
   readonly colorError = signal('');
@@ -151,6 +159,10 @@ export class Receive implements OnInit, OnDestroy {
   private readonly colorCard = buildTestCard();
   private frameCounter = 0;
   private colorIdle = 0;
+  private player: AudioFeedbackPlayer | null = null;
+  private feedbackTimer: ReturnType<typeof setInterval> | null = null;
+  private codeTimes: number[] = [];
+  private completeReports = 0;
 
   async ngOnInit(): Promise<void> {
     await this.refreshCameras();
@@ -159,6 +171,83 @@ export class Receive implements OnInit, OnDestroy {
   ngOnDestroy(): void {
     this.stop();
     this.revokeResult();
+    this.disableFeedback();
+  }
+
+  // --- kanał zwrotny (dźwięk) ---------------------------------------------
+
+  async toggleFeedback(): Promise<void> {
+    if (this.feedbackEnabled()) {
+      this.disableFeedback();
+      return;
+    }
+    this.feedbackStatus.set('Ładuję ggwave…');
+    try {
+      this.player = await AudioFeedbackPlayer.create(document.baseURI);
+      this.feedbackEnabled.set(true);
+      this.feedbackStatus.set('Raporty będą grane co 2,5 s, gdy trwa odbiór.');
+      this.feedbackTimer = setInterval(() => this.sendFeedback(), FEEDBACK_INTERVAL_MS);
+    } catch (err) {
+      this.feedbackStatus.set(`Nie udało się włączyć: ${this.describeError(err)}`);
+    }
+  }
+
+  disableFeedback(): void {
+    if (this.feedbackTimer) {
+      clearInterval(this.feedbackTimer);
+      this.feedbackTimer = null;
+    }
+    this.player?.destroy();
+    this.player = null;
+    this.feedbackEnabled.set(false);
+  }
+
+  onFeedbackProtocol(event: Event): void {
+    this.feedbackProtocol.set((event.target as HTMLSelectElement).value as FeedbackProtocol);
+  }
+
+  onFeedbackVolume(event: Event): void {
+    this.feedbackVolume.set(Number((event.target as HTMLInputElement).value));
+  }
+
+  /** Gra przykładowy raport, żeby sprawdzić głośność i czy nadajnik słyszy. */
+  testFeedback(): void {
+    if (!this.player) return;
+    const bytes = encodeFeedback({ transferId: 0, decoded: 0, blockCount: 0, recentCodes: 0, complete: false, missing: [] });
+    const seconds = this.player.play(bytes, this.feedbackProtocol(), this.feedbackVolume());
+    this.feedbackStatus.set(`Test: ${bytes.length} B w ${seconds.toFixed(1)} s.`);
+  }
+
+  private sendFeedback(): void {
+    const t = this.transfer();
+    const decoder = this.decoder;
+    if (!this.player || !t || !decoder || this.player.busy) return;
+    if (decoder.isComplete) {
+      if (this.completeReports >= 4) return;
+      this.completeReports++;
+    }
+    const since = performance.now() - FEEDBACK_INTERVAL_MS;
+    this.codeTimes = this.codeTimes.filter((ts) => ts >= since);
+    const missing: number[] = [];
+    const remaining = decoder.blockCount - decoder.decodedCount;
+    if (remaining > 0 && remaining <= FEEDBACK_MAX_MISSING) {
+      for (let i = 0; i < decoder.blockCount && missing.length < FEEDBACK_MAX_MISSING; i++) {
+        if (!decoder.blocks[i]) missing.push(i);
+      }
+    }
+    const bytes = encodeFeedback({
+      transferId: transferIdOf(t.fileId),
+      decoded: decoder.decodedCount,
+      blockCount: decoder.blockCount,
+      recentCodes: this.codeTimes.length,
+      complete: decoder.isComplete,
+      missing,
+    });
+    const seconds = this.player.play(bytes, this.feedbackProtocol(), this.feedbackVolume());
+    this.feedbackSent.update((n) => n + 1);
+    this.feedbackStatus.set(
+      `Raport #${this.feedbackSent()}: ${decoder.decodedCount}/${decoder.blockCount}, ${this.codeTimes.length} kodów w oknie, ${bytes.length} B w ${seconds.toFixed(1)} s.`,
+    );
   }
 
   onCamera(event: Event): void {
@@ -398,6 +487,7 @@ export class Receive implements OnInit, OnDestroy {
       this.beginTransfer(frame.header);
     }
     this.stats.update((s) => ({ ...s, codes: s.codes + 1 }));
+    this.codeTimes.push(performance.now());
     const decoder = this.decoder!;
     if (decoder.isComplete) return;
 
@@ -510,6 +600,8 @@ export class Receive implements OnInit, OnDestroy {
     this.stats.set({ frames: 0, codes: 0, useful: 0, duplicates: 0, invalid: 0 });
     this.startedAt = performance.now();
     this.elapsed.set(0);
+    this.codeTimes = [];
+    this.completeReports = 0;
     this.scheduleGrid();
   }
 

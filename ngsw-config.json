@@ -13,7 +13,8 @@
           "/manifest.webmanifest",
           "/*.css",
           "/*.js",
-          "/zxing/*.wasm"
+          "/zxing/*.wasm",
+          "/ggwave/*.js"
         ]
       }
     },

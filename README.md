@@ -91,6 +91,38 @@ w praktyce liczy się, ile kodów kamera realnie dekoduje. Zamiast zgadywać, ur
 Odbiornik pokazuje też na żywo klatki/s, kody/s i ETA oraz pozwala wybrać rozdzielczość przechwytywania
 (720p/1080p/4K).
 
+## Kanał zwrotny przez dźwięk (opcjonalny)
+
+Kanał ekran→kamera jest jednokierunkowy, więc po pierwszym cyklu nadajnik łata dziury "na ślepo" i przy
+typowych 5–10% strat potrzebuje łącznie ok. 1,45–1,55 cyklu (symulacja na kodeku z aplikacji, K = 250).
+Każdy ślepy rozkład, który łata szybciej, karze odbiornik dołączający po pierwszym cyklu, bo nie ma w nim
+kropli stopnia 1. Z informacją zwrotną obie sytuacje da się obsłużyć naraz:
+
+| odbiornik zgłasza | dosłanie przy 5% strat | przy 10% | łącznie |
+|---|---|---|---|
+| nic (dziś, na ślepo) | 113 kodów | 132 | 1,45–1,53 cyklu |
+| liczbę brakujących bloków m | 22 | 48 | 1,09–1,19 cyklu |
+| listę brakujących bloków | 15 | 28 | 1,06–1,11 cyklu |
+
+Implementacja (`src/app/core/feedback.ts`, `src/app/audio/ggwave.ts`):
+
+- **Raport** (odbiornik → nadajnik, co 2,5 s): id transferu, zdekodowane bloki, kodów odebranych w oknie,
+  flaga "komplet", do 4 indeksów brakujących bloków. 15–31 bajtów.
+- **Transport**: [ggwave](https://github.com/ggerganov/ggwave) (FSK + Reed-Solomon, 8–16 B/s) ładowany
+  lokalnie z `ggwave/ggwave.js`. Protokół słyszalny albo ultradźwiękowy, do wyboru na odbiorniku. Odbiornik
+  **tylko gra**, mikrofon włącza nadajnik, więc urządzenie odcięte od sieci niczego nie słucha.
+- **Stopień kropli w numerze kropli**: górne 8 bitów numeru to spodziewana liczba braków m; odbiornik liczy
+  wtedy sąsiadów o stopniu K/m, deterministycznie, bez wiedzy o kanale zwrotnym (format ramki v2).
+- **Nadajnik** z nasłuchem: dosyła wprost bloki z listy brakujących na przemian z kroplami o stopniu K/m,
+  zatrzymuje się po raporcie "komplet" (auto-stop), powtarza cykl systematyczny, gdy odbiornik zgłasza zero
+  (dołączył późno), i opcjonalnie reguluje fps według stosunku odebranych kodów do nadanych.
+- Bez raportów (hałas, brak mikrofonu) nadajnik zachowuje się jak dotąd.
+
+Użycie: odbiornik → *Kanał zwrotny (dźwięk)* → *Włącz* (ew. *Test dźwięku*, żeby ustawić głośność);
+nadajnik → *Kanał zwrotny (dźwięk)* → *Nasłuchuj odbiornika* (zgoda na mikrofon). Status pod przyciskiem
+pokazuje ostatni raport. Weryfikacja bez sprzętu: pętla programowa (raport zakodowany ggwave wpuszczony w
+strumień podstawiony pod mikrofon) dała poprawny odczyt listy braków i auto-stop.
+
 ## Multipleksowanie w kolorze: research i pomiar
 
 Pomysł: trzy niezależne kody QR w kanałach R, G i B jednej klatki (3× danych w tym samym miejscu).

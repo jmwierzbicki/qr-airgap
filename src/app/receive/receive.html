@@ -53,6 +53,37 @@
     </div>
   </div>
 
+  <details class="feedback" [open]="feedbackEnabled()">
+    <summary>Kanał zwrotny (dźwięk), opcjonalny</summary>
+    <p class="hint">
+      To urządzenie gra głośnikiem krótkie raporty o postępie; nadajnik z włączonym nasłuchem zatrzyma się po
+      komplecie i dośle dokładnie to, czego brakuje. Odbiornik tylko gra, nigdy nie słucha.
+    </p>
+    <div class="controls">
+      <label class="field">
+        <span>Protokół</span>
+        <select [value]="feedbackProtocol()" (change)="onFeedbackProtocol($event)">
+          @for (p of feedbackProtocols; track p.value) {
+            <option [value]="p.value" [selected]="p.value === feedbackProtocol()">{{ p.label }}</option>
+          }
+        </select>
+      </label>
+      <label class="field">
+        <span>Głośność: {{ feedbackVolume() }}</span>
+        <input type="range" min="10" max="100" step="5" [value]="feedbackVolume()" (input)="onFeedbackVolume($event)" />
+      </label>
+      <div class="row buttons">
+        <button type="button" [class.primary]="!feedbackEnabled()" [class.danger]="feedbackEnabled()" (click)="toggleFeedback()">
+          {{ feedbackEnabled() ? 'Wyłącz kanał zwrotny' : 'Włącz kanał zwrotny' }}
+        </button>
+        <button type="button" [disabled]="!feedbackEnabled()" (click)="testFeedback()">Test dźwięku</button>
+      </div>
+    </div>
+    @if (feedbackStatus()) {
+      <p class="hint">{{ feedbackStatus() }}</p>
+    }
+  </details>
+
   @if (error()) {
     <p class="error">{{ error() }}</p>
   }

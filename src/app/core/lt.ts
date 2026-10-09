@@ -79,7 +79,11 @@ export class LtScheme {
     if (seed < K) return [seed];
 
     const rand = mulberry32(seed);
-    const degree = sampleDegree(this.cdf, rand());
+    // Górne 8 bitów numeru kropli to podpowiedź: spodziewana liczba brakujących
+    // bloków m (z kanału zwrotnego). Wtedy stopień K/m maksymalizuje szansę,
+    // że kropla zawiera dokładnie jeden nieznany blok. Zero = robust soliton.
+    const hint = seed >>> 24;
+    const degree = hint ? Math.max(1, Math.min(K, Math.round(K / hint))) : sampleDegree(this.cdf, rand());
 
     if (degree * 2 <= K) {
       const picked = new Set<number>();

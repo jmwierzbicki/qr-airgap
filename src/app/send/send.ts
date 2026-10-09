@@ -37,6 +37,14 @@ import {
   type Profile,
 } from '../core/profile';
 import { encodeWire } from '../core/wire';
+import {
+  FEEDBACK_INTERVAL_MS,
+  FeedbackPlanner,
+  adjustFps,
+  decodeFeedback,
+  transferIdOf,
+} from '../core/feedback';
+import { AudioFeedbackListener } from '../audio/ggwave';
 
 interface PreparedPayload {
   name: string;
@@ -91,6 +99,20 @@ export class Send implements OnDestroy {
   readonly error = signal('');
   readonly notice = signal('');
 
+  // Kanał zwrotny (dźwięk): nadajnik słucha raportów odbiornika.
+  readonly listening = signal(false);
+  readonly listeningStatus = signal('');
+  readonly autoStop = signal(true);
+  readonly rateControl = signal(false);
+  readonly lastReport = signal<{ decoded: number; blockCount: number; recentCodes: number; complete: boolean; at: number } | null>(null);
+  readonly reportsReceived = signal(0);
+  readonly transferId = signal(0);
+  readonly now = signal(performance.now());
+  readonly reportAgeSeconds = computed(() => {
+    const r = this.lastReport();
+    return r ? Math.max(0, (this.now() - r.at) / 1000) : null;
+  });
+
   readonly blockSize = computed(() => this.profile().blockSize);
   readonly fps = computed(() => this.profile().fps);
   readonly grid = computed(() => this.profile().grid);
@@ -142,9 +164,73 @@ export class Send implements OnDestroy {
   private readonly scratch = document.createElement('canvas');
   private calibrationStartedAt = 0;
   private calibrationCodeIndex = 0;
+  private planner: FeedbackPlanner | null = null;
+  private listener: AudioFeedbackListener | null = null;
+  private nowTimer: ReturnType<typeof setInterval> | null = null;
 
   ngOnDestroy(): void {
     this.stop();
+    this.stopListening();
+  }
+
+  // --- kanał zwrotny -------------------------------------------------------
+
+  async startListening(): Promise<void> {
+    if (this.listener) return;
+    this.listeningStatus.set('Uruchamiam mikrofon…');
+    try {
+      this.listener = await AudioFeedbackListener.create(document.baseURI, (bytes) => this.onFeedback(bytes));
+      this.listening.set(true);
+      this.listeningStatus.set('Nasłuchuję raportów odbiornika.');
+      this.nowTimer = setInterval(() => this.now.set(performance.now()), 500);
+    } catch (err) {
+      this.listeningStatus.set(`Nie udało się włączyć nasłuchu: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  stopListening(): void {
+    this.listener?.destroy();
+    this.listener = null;
+    this.listening.set(false);
+    if (this.nowTimer) {
+      clearInterval(this.nowTimer);
+      this.nowTimer = null;
+    }
+  }
+
+  onAutoStop(event: Event): void {
+    this.autoStop.set((event.target as HTMLInputElement).checked);
+  }
+
+  onRateControl(event: Event): void {
+    this.rateControl.set((event.target as HTMLInputElement).checked);
+  }
+
+  private onFeedback(bytes: Uint8Array): void {
+    const msg = decodeFeedback(bytes);
+    if (!msg) return;
+    const at = performance.now();
+    this.reportsReceived.update((n) => n + 1);
+    if (!this.planner || !this.planner.report(msg, at)) {
+      this.listeningStatus.set(`Raport z innego transferu (#${msg.transferId.toString(16)}).`);
+      return;
+    }
+    this.lastReport.set({ decoded: msg.decoded, blockCount: msg.blockCount, recentCodes: msg.recentCodes, complete: msg.complete, at });
+    this.listeningStatus.set('');
+    if (this.planner.complete && this.autoStop()) {
+      this.stop();
+      this.notice.set('Odbiornik potwierdził komplet. Nadawanie zatrzymane.');
+      return;
+    }
+    if (this.rateControl() && this.running() && !this.calibrating()) {
+      const sent = this.fps() * this.codesPerFrame() * (FEEDBACK_INTERVAL_MS / 1000);
+      const fps = adjustFps(this.fps(), msg.recentCodes, sent);
+      if (fps !== this.fps()) {
+        // Bez restartu transferu: ten sam plik, tylko inne tempo.
+        this.profile.set({ ...this.profile(), fps });
+        this.scheduleTimer(fps);
+      }
+    }
   }
 
   // --- źródło danych -------------------------------------------------------
@@ -243,6 +329,9 @@ export class Send implements OnDestroy {
     };
     this.seed = 0;
     this.framesSent.set(0);
+    this.planner = new FeedbackPlanner(this.encoder.blockCount, transferIdOf(this.header.fileId));
+    this.transferId.set(transferIdOf(this.header.fileId));
+    this.lastReport.set(null);
     if (!this.prepareLayout(blockSize, this.grid(), this.binary())) return;
 
     this.running.set(true);
@@ -364,11 +453,16 @@ export class Send implements OnDestroy {
   }
 
   private renderTransferFrame(canvas: HTMLCanvasElement): void {
-    if (!this.encoder || !this.header) return;
+    if (!this.encoder || !this.header || !this.planner) return;
+    if (this.planner.complete && this.autoStop()) {
+      this.stop();
+      this.notice.set('Odbiornik potwierdził komplet. Nadawanie zatrzymane.');
+      return;
+    }
     const wires: Uint8Array[] = [];
+    const now = performance.now();
     for (let i = 0; i < this.codesPerFrame(); i++) {
-      const seed = this.seed;
-      this.seed = (this.seed + 1) >>> 0;
+      const seed = this.planner.next(now);
       wires.push(
         encodeWire({ header: { ...this.header, seed }, payload: this.encoder.droplet(seed) }, this.binary()),
       );
