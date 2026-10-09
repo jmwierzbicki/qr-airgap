@@ -1,0 +1,100 @@
+<section class="panel">
+  <h2>Kamera</h2>
+  <div class="controls">
+    <label class="field">
+      <span>Urządzenie</span>
+      <select [value]="selectedCamera()" (change)="onCamera($event)">
+        <option value="" [selected]="selectedCamera() === ''">Automatycznie (tylna kamera)</option>
+        @for (cam of cameras(); track cam.deviceId) {
+          <option [value]="cam.deviceId" [selected]="cam.deviceId === selectedCamera()">
+            {{ cam.label || 'Kamera ' + ($index + 1) }}
+          </option>
+        }
+      </select>
+    </label>
+    <label class="field">
+      <span>Silnik dekodera</span>
+      <select [value]="preferredEngine()" (change)="onEngine($event)">
+        <option value="auto" [selected]="preferredEngine() === 'auto'">Automatycznie</option>
+        <option value="native" [selected]="preferredEngine() === 'native'">Natywny (BarcodeDetector)</option>
+        <option value="wasm" [selected]="preferredEngine() === 'wasm'">ZXing WebAssembly</option>
+      </select>
+    </label>
+    <div class="row buttons">
+      @if (!running()) {
+        <button type="button" class="primary" [disabled]="starting()" (click)="start()">
+          {{ starting() ? 'Uruchamiam…' : 'Start kamery' }}
+        </button>
+      } @else {
+        <button type="button" class="danger" (click)="stop()">Stop</button>
+      }
+      <button type="button" (click)="reset()">Wyczyść</button>
+    </div>
+  </div>
+
+  @if (error()) {
+    <p class="error">{{ error() }}</p>
+  }
+
+  <div class="viewfinder" [class.hit]="lastCodeAt() > 0 && running()">
+    <video #video playsinline muted autoplay></video>
+    @if (running()) {
+      <span class="badge">
+        {{ engine() === 'native' ? 'BarcodeDetector' : 'ZXing wasm' }} · {{ scanRate() | number: '1.0-0' }} kl/s ·
+        {{ codeRate() | number: '1.1-1' }} kodów/s
+      </span>
+    }
+  </div>
+</section>
+
+<section class="panel">
+  <h2>Odbiór</h2>
+
+  @if (transfer(); as t) {
+    <div class="progress">
+      <div class="bar" [class.done]="decoded() === t.blockCount" [style.width.%]="progress()"></div>
+      <span class="label">{{ decoded() }} / {{ t.blockCount }} bloków ({{ progress() | number: '1.0-0' }}%)</span>
+    </div>
+    <dl class="meta">
+      <dt>Transfer</dt>
+      <dd>#{{ t.fileId.toString(16) }}, {{ formatBytes(t.dataLength) }} w {{ t.blockCount }} blokach po {{ t.blockSize }} B{{ t.flags ? ', gzip' : '' }}</dd>
+      <dt>Czas</dt>
+      <dd>
+        {{ elapsed() | number: '1.0-0' }} s
+        @if (etaSeconds() !== null && decoded() < t.blockCount) {
+          <small>· pozostało ok. {{ etaSeconds() | number: '1.0-0' }} s</small>
+        }
+      </dd>
+      <dt>Kody</dt>
+      <dd>
+        {{ stats().codes }} odczytane, {{ stats().useful }} użyteczne, {{ stats().duplicates }} powtórzone
+        @if (stats().invalid) {
+          , {{ stats().invalid }} nierozpoznane
+        }
+      </dd>
+    </dl>
+  } @else {
+    <p class="hint">
+      Skieruj kamerę na ekran nadajnika. Kod powinien wypełniać możliwie dużą część kadru i być ostry.
+      Odbiór zaczyna się automatycznie po rozpoznaniu pierwszego kodu, kolejność nie ma znaczenia.
+    </p>
+  }
+
+  <canvas #grid class="grid" title="Mapa bloków: zielone = odebrane"></canvas>
+
+  @if (result(); as r) {
+    <div class="result">
+      <h3>Gotowe: {{ r.name }}</h3>
+      <p>{{ formatBytes(r.size) }}, {{ r.mime }}, suma kontrolna zgodna.</p>
+      <div class="row">
+        <a class="button primary" [href]="r.url" [download]="r.name">Pobierz plik</a>
+        @if (r.text !== null) {
+          <button type="button" (click)="copyText()">Kopiuj tekst</button>
+        }
+      </div>
+      @if (r.text !== null) {
+        <pre class="preview">{{ r.text }}</pre>
+      }
+    </div>
+  }
+</section>

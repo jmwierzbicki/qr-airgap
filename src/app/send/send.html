@@ -1,0 +1,108 @@
+<section class="panel">
+  <h2>1. Co wysyłamy?</h2>
+
+  <div class="source">
+    <label class="field">
+      <span>Tekst</span>
+      <textarea
+        rows="5"
+        placeholder="Wklej tekst, kod, konfigurację..."
+        [value]="text()"
+        (input)="onTextInput($event)"
+      ></textarea>
+    </label>
+    <div class="row">
+      <button type="button" (click)="useText()">Użyj tego tekstu</button>
+      <span class="or">albo</span>
+      <label class="file-btn">
+        Wybierz plik
+        <input type="file" (change)="onFileSelected($event)" />
+      </label>
+    </div>
+  </div>
+
+  @if (payload(); as p) {
+    <dl class="meta">
+      <dt>Plik</dt>
+      <dd>{{ p.name }} <small>({{ p.mime }})</small></dd>
+      <dt>Rozmiar</dt>
+      <dd>
+        {{ formatBytes(p.size) }}
+        @if (p.packed.flags) {
+          <small>→ {{ formatBytes(p.packed.bytes.length) }} po gzip</small>
+        }
+      </dd>
+      <dt>Bloków</dt>
+      <dd>{{ blockCount() }} × {{ effectiveBlockSize() }} B</dd>
+    </dl>
+  }
+</section>
+
+<section class="panel">
+  <h2>2. Parametry</h2>
+  <div class="controls">
+    <label class="field">
+      <span>Bajtów na kod</span>
+      <select [value]="blockSize()" (change)="onBlockSize($event)">
+        @for (preset of blockPresets; track preset.value) {
+          <option [value]="preset.value" [selected]="preset.value === blockSize()">{{ preset.label }}</option>
+        }
+      </select>
+    </label>
+    <label class="field">
+      <span>Kodów na sekundę: {{ fps() }}</span>
+      <input type="range" min="2" max="20" step="1" [value]="fps()" (input)="onFps($event)" />
+    </label>
+    <label class="field">
+      <span>Korekcja błędów QR</span>
+      <select [value]="ecLevel()" (change)="onEcLevel($event)">
+        <option value="L" [selected]="ecLevel() === 'L'">L (7%, najwięcej danych)</option>
+        <option value="M" [selected]="ecLevel() === 'M'">M (15%)</option>
+        <option value="Q" [selected]="ecLevel() === 'Q'">Q (25%, trudne warunki)</option>
+      </select>
+    </label>
+  </div>
+  <p class="hint">
+    Przepustowość nominalna: <strong>{{ formatBytes(throughput()) }}/s</strong>.
+    @if (blockCount()) {
+      Pełny cykl {{ blockCount() }} kodów to ok. <strong>{{ cycleSeconds() | number: '1.0-0' }} s</strong>;
+      przy stratach odbiornik dobiera brakujące bloki z kolejnych kodów (kod fontannowy),
+      więc nie trzeba niczego powtarzać ręcznie.
+    }
+  </p>
+</section>
+
+<section class="panel stage-panel">
+  <h2>3. Nadawanie</h2>
+  <div class="row">
+    @if (!running()) {
+      <button type="button" class="primary" [disabled]="!payload()" (click)="start()">Start</button>
+    } @else {
+      <button type="button" class="danger" (click)="stop()">Stop</button>
+    }
+    <button type="button" [disabled]="!running()" (click)="toggleFullscreen()">Pełny ekran</button>
+    @if (running()) {
+      <span class="status">
+        QR v{{ qrVersion() }} ({{ qrModules() }}×{{ qrModules() }}), ramka {{ frameBytes() }} B,
+        wysłano {{ framesSent() }} kodów
+      </span>
+    }
+  </div>
+
+  @if (error()) {
+    <p class="error">{{ error() }}</p>
+  }
+
+  <div class="stage" #stage [class.active]="running()">
+    <canvas #canvas></canvas>
+    @if (!running()) {
+      <p class="placeholder">Tu pojawi się strumień kodów. Ustaw odbiornik tak, żeby kod wypełniał kadr.</p>
+    }
+  </div>
+
+  @if (running()) {
+    <div class="progress" title="Postęp pierwszego (systematycznego) cyklu">
+      <div class="bar" [style.width.%]="cycleProgress()"></div>
+    </div>
+  }
+</section>

@@ -1,0 +1,91 @@
+:host {
+  display: grid;
+  gap: 1rem;
+}
+
+.source {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.or {
+  color: var(--muted);
+}
+
+.meta {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.25rem 1rem;
+  margin: 1rem 0 0;
+
+  dt {
+    color: var(--muted);
+  }
+
+  dd {
+    margin: 0;
+  }
+}
+
+.controls {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 1rem;
+}
+
+.stage {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 100%;
+  min-height: 320px;
+  aspect-ratio: 1;
+  max-height: 85vh;
+  margin-top: 1rem;
+  background: #fff;
+  border: 1px dashed var(--border);
+  border-radius: 12px;
+
+  &.active {
+    border-style: solid;
+  }
+
+  &:fullscreen {
+    aspect-ratio: auto;
+    max-height: none;
+    border: 0;
+    border-radius: 0;
+  }
+
+  canvas {
+    display: block;
+    max-width: 100%;
+    max-height: 100%;
+    image-rendering: pixelated;
+  }
+
+  .placeholder {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    margin: 0;
+    padding: 1rem;
+    text-align: center;
+    color: var(--muted);
+  }
+}
+
+.progress {
+  height: 6px;
+  margin-top: 0.75rem;
+  background: var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+
+  .bar {
+    height: 100%;
+    background: var(--accent);
+    transition: width 0.2s linear;
+  }
+}
