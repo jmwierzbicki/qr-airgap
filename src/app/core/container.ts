@@ -11,9 +11,10 @@
 
 import { gunzipSync, gzipSync } from 'fflate';
 import { utf8Decode, utf8Encode } from './bytes';
+import { FLAG_GZIP } from './frame';
 
 export const CONTAINER_VERSION = 1;
-export const FLAG_GZIP = 0b0000_0001;
+export { FLAG_GZIP };
 
 export interface Payload {
   name: string;

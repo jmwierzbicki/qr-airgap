@@ -17,6 +17,25 @@ Kamera wymaga bezpiecznego kontekstu: strona musi być serwowana przez **HTTPS**
 Na urządzeniu offline wystarczy wcześniej otworzyć stronę raz (service worker zapisze ją w pamięci) albo
 skopiować katalog `dist/qr-airgap/browser` i podać go lokalnym serwerem, np. `npx serve dist/qr-airgap/browser`.
 
+## Profile i kalibracja
+
+Parametry transmisji są zebrane w **profil**: bajtów na kod, klatek na sekundę, kodów na klatkę (1, 2 lub 4)
+i kodowanie (base64 albo binarne). 72 kombinacje z tabeli kalibracyjnej mają czytelne nazwy
+"Przymiotnik Zwierzę": zwierzę koduje siatkę i rozmiar bloku, przymiotnik koduje fps i kodowanie
+(np. *Zwinny Wilk* = 2 kody × 700 B, 10 kl/s, binarnie).
+
+Kanał jest jednokierunkowy, więc kalibracja działa "na ślepo":
+
+1. Odbiornik: *Start kamery*. Nadajnik: *Kalibracja* (ok. 3 min). Nadajnik przelatuje po wszystkich
+   profilach, każdy przez 2,5 s, nadając nieściśliwe ramki testowe.
+2. Odbiornik zlicza, ile unikatowych kodów z każdego profilu dotarło, i na bieżąco pokazuje ranking
+   wg realnej przepustowości (bajty odebrane / czas profilu). Najlepszy profil jest wyróżniony.
+3. Na nadajniku wpisz nazwę zwycięskiego profilu w polu *Nazwa profilu* (wielkość liter i polskie znaki
+   nie mają znaczenia) i wciśnij *Zastosuj*. Profil zapisuje się w przeglądarce.
+
+Tryb binarny wymaga po stronie odbiornika silnika ZXing (BarcodeDetector zwraca tylko tekst). Odbiornik
+rozpoznaje ramki binarne po sygnaturze `FQ` i sam przełącza silnik, jeśli trzeba.
+
 ## Dlaczego tak: research i wybór algorytmów
 
 Kanał ekran → kamera jest **jednokierunkowy i stratny**. Nie ma kanału zwrotnego, więc odbiornik nie może poprosić
@@ -38,8 +57,11 @@ Porównane podejścia:
   dziury. Dekoder *peeling* (belief propagation) z kaskadowym rozwiązywaniem.
 - **Ramka** (`src/app/core/frame.ts`): 26 B nagłówka (magic, id transferu, K, rozmiar bloku, długość, flagi, CRC32,
   numer kropli) + blok. Odbiornik może dołączyć w dowolnym momencie i sam wykrywa nowy transfer po zmianie id.
-- **Transport w QR**: ramka w base64, tryb bajtowy QR. Base64 kosztuje 25% pojemności, ale natywny `BarcodeDetector`
-  zwraca wyłącznie tekst i przy surowych bajtach zgadywałby kodowanie znaków; ASCII jest bezpieczne w każdym silniku.
+- **Transport w QR** (`src/app/core/wire.ts`): tryb bajtowy QR, ramka jako **base64** (działa z każdym
+  skanerem, bo `BarcodeDetector` zwraca wyłącznie tekst) albo jako **surowe bajty** (+33% danych na kod,
+  wymaga `zxing-wasm`, który oddaje bajty).
+- **Siatka kodów**: 1, 2 lub 4 niezależne kody na klatce, każdy z własną kroplą. ZXing dekoduje wiele symboli
+  z jednego obrazu, a kilka mniejszych kodów jest odporniejszych na perspektywę i nieostrość niż jeden wielki.
 - **Integralność**: QR ma własną korekcję błędów (domyślnie L, bo fontanna i tak radzi sobie ze stratami, a L daje
   najwięcej danych na ramkę), a całość jest sprawdzana CRC32 przed rozpakowaniem.
 
@@ -60,8 +82,10 @@ Porównane podejścia:
 | 900–1300 | ~25–30 | monitor + nowoczesny telefon na statywie |
 | 2000 | ~40 | tylko bardzo ostry obraz |
 
-Przy 600 B i 8 kodach/s to ok. 4,7 KB/s nominalnie; w praktyce liczy się ile ramek kamera realnie dekoduje.
-Odbiornik pokazuje na żywo klatki/s, kody/s i ETA, więc parametry da się dobrać empirycznie.
+Przy 700 B i 10 klatkach/s to ok. 7 KB/s nominalnie na jeden kod, przy siatce 2×2 cztery razy tyle;
+w praktyce liczy się, ile kodów kamera realnie dekoduje. Zamiast zgadywać, uruchom kalibrację (wyżej).
+Odbiornik pokazuje też na żywo klatki/s, kody/s i ETA oraz pozwala wybrać rozdzielczość przechwytywania
+(720p/1080p/4K).
 
 ## Rozwój
 
@@ -73,8 +97,8 @@ npm run build      # dist/qr-airgap/browser
 ```
 
 Test end-to-end bez fizycznej kamery: w konsoli strony *Odbierz* podmień `navigator.mediaDevices.getUserMedia`
-na funkcję zwracającą `canvas.captureStream()` z rysowanymi kodami (tak został zweryfikowany cały tor
-QR → wideo → zxing-wasm → dekoder).
+na funkcję zwracającą `canvas.captureStream()` z rysowanymi kodami. Tak zweryfikowano cały tor
+QR → wideo → zxing-wasm → dekoder, łącznie z siatką 2 kodów, trybem binarnym i rankingiem kalibracji.
 
 ## Wdrożenie na GitHub Pages
 

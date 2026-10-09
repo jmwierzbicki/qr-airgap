@@ -9,10 +9,19 @@ import {
   signal,
   viewChild,
 } from '@angular/core';
-import { base64ToBytes, crc32, formatBytes, utf8Decode } from '../core/bytes';
+import { crc32, formatBytes, utf8Decode } from '../core/bytes';
 import { unpackContainer } from '../core/container';
-import { decodeFrame, sameTransfer, type FrameHeader } from '../core/frame';
+import { FLAG_CALIBRATION, sameTransfer, type FrameHeader } from '../core/frame';
 import { LtDecoder } from '../core/lt';
+import {
+  CALIBRATION_MS,
+  CALIBRATION_PROFILES,
+  CALIBRATION_TABLE_VERSION,
+  calibrationCodes,
+  profileName,
+  type Profile,
+} from '../core/profile';
+import { decodeWire, looksLikeBinaryFrame, type ScanHit } from '../core/wire';
 import { createQrScanner, type QrScanner, type ScanEngine } from '../scan/qr-scanner';
 
 interface ScanStats {
@@ -31,7 +40,27 @@ interface ReceivedFile {
   text: string | null;
 }
 
+interface CalibrationEntry {
+  seen: Set<number>;
+  firstAt: number;
+  lastAt: number;
+}
+
+export interface CalibrationRow {
+  index: number;
+  name: string;
+  profile: Profile;
+  received: number;
+  sent: number;
+  bytesPerSecond: number;
+}
+
 const TEXT_EXTENSIONS = /\.(txt|md|lua|json|js|ts|py|csv|xml|html|css|yml|yaml|ini|cfg|log|sh|bat)$/i;
+const RESOLUTIONS = [
+  { width: 1280, height: 720, label: '720p (szybki dekoder)' },
+  { width: 1920, height: 1080, label: '1080p (zalecane)' },
+  { width: 3840, height: 2160, label: '4K (gęste kody, wolniej)' },
+];
 
 @Component({
   selector: 'app-receive',
@@ -42,20 +71,25 @@ const TEXT_EXTENSIONS = /\.(txt|md|lua|json|js|ts|py|csv|xml|html|css|yml|yaml|i
 })
 export class Receive implements OnInit, OnDestroy {
   readonly formatBytes = formatBytes;
+  readonly resolutions = RESOLUTIONS;
 
   readonly cameras = signal<MediaDeviceInfo[]>([]);
   readonly selectedCamera = signal('');
+  readonly resolution = signal(1920);
   readonly running = signal(false);
   readonly starting = signal(false);
   readonly engine = signal<ScanEngine | ''>('');
   readonly preferredEngine = signal<ScanEngine | 'auto'>('auto');
   readonly error = signal('');
+  readonly notice = signal('');
   readonly stats = signal<ScanStats>({ frames: 0, codes: 0, useful: 0, duplicates: 0, invalid: 0 });
   readonly transfer = signal<FrameHeader | null>(null);
   readonly decoded = signal(0);
   readonly elapsed = signal(0);
   readonly result = signal<ReceivedFile | null>(null);
   readonly lastCodeAt = signal(0);
+  readonly calibrationRows = signal<CalibrationRow[]>([]);
+  readonly calibrationCurrent = signal('');
 
   readonly progress = computed(() => {
     const t = this.transfer();
@@ -69,6 +103,7 @@ export class Receive implements OnInit, OnDestroy {
     if (!t || !rate) return null;
     return Math.max(0, (t.blockCount - this.decoded()) / rate);
   });
+  readonly bestCalibration = computed(() => this.calibrationRows()[0] ?? null);
 
   private readonly videoRef = viewChild<ElementRef<HTMLVideoElement>>('video');
   private readonly gridRef = viewChild<ElementRef<HTMLCanvasElement>>('grid');
@@ -80,6 +115,8 @@ export class Receive implements OnInit, OnDestroy {
   private clock: ReturnType<typeof setInterval> | null = null;
   private gridDirty = false;
   private loopToken = 0;
+  private readonly calibration = new Map<number, CalibrationEntry>();
+  private calibrationDirty = false;
 
   async ngOnInit(): Promise<void> {
     await this.refreshCameras();
@@ -100,6 +137,11 @@ export class Receive implements OnInit, OnDestroy {
     if (this.running()) void this.start();
   }
 
+  onResolution(event: Event): void {
+    this.resolution.set(Number((event.target as HTMLSelectElement).value));
+    if (this.running()) void this.start();
+  }
+
   async start(): Promise<void> {
     this.stop();
     this.error.set('');
@@ -108,10 +150,12 @@ export class Receive implements OnInit, OnDestroy {
       if (!navigator.mediaDevices?.getUserMedia) {
         throw new Error('Przeglądarka nie udostępnia kamery (wymagane HTTPS lub localhost).');
       }
+      const res = RESOLUTIONS.find((r) => r.width === this.resolution()) ?? RESOLUTIONS[1];
       const deviceId = this.selectedCamera();
+      const size = { width: { ideal: res.width }, height: { ideal: res.height } };
       const video: MediaTrackConstraints = deviceId
-        ? { deviceId: { exact: deviceId }, width: { ideal: 1920 }, height: { ideal: 1080 } }
-        : { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } };
+        ? { deviceId: { exact: deviceId }, ...size }
+        : { facingMode: 'environment', ...size };
       this.stream = await navigator.mediaDevices.getUserMedia({ video, audio: false });
       const el = this.videoRef()?.nativeElement;
       if (!el) throw new Error('Brak elementu wideo');
@@ -120,7 +164,10 @@ export class Receive implements OnInit, OnDestroy {
       await this.refreshCameras();
 
       const prefer = this.preferredEngine();
-      this.scanner = await createQrScanner(document.baseURI, prefer === 'auto' ? undefined : prefer);
+      this.scanner = await createQrScanner(document.baseURI, {
+        prefer: prefer === 'auto' ? undefined : prefer,
+        maxWidth: res.width,
+      });
       this.engine.set(this.scanner.engine);
 
       this.running.set(true);
@@ -157,6 +204,10 @@ export class Receive implements OnInit, OnDestroy {
     this.stats.set({ frames: 0, codes: 0, useful: 0, duplicates: 0, invalid: 0 });
     this.startedAt = performance.now();
     this.elapsed.set(0);
+    this.calibration.clear();
+    this.calibrationRows.set([]);
+    this.calibrationCurrent.set('');
+    this.notice.set('');
     this.drawGrid();
   }
 
@@ -165,35 +216,53 @@ export class Receive implements OnInit, OnDestroy {
     if (text) await navigator.clipboard.writeText(text);
   }
 
+  async copyName(name: string): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(name);
+      this.notice.set(`Skopiowano "${name}". Wpisz tę nazwę w polu profilu na nadajniku.`);
+    } catch {
+      this.notice.set(`Nazwa profilu: ${name}`);
+    }
+  }
+
   private async loop(token: number, video: HTMLVideoElement): Promise<void> {
     while (token === this.loopToken && this.scanner) {
-      let texts: string[] = [];
+      let hits: ScanHit[] = [];
       try {
-        texts = await this.scanner.scan(video);
+        hits = await this.scanner.scan(video);
       } catch (err) {
         this.error.set(this.describeError(err));
       }
       if (token !== this.loopToken) return;
       this.stats.update((s) => ({ ...s, frames: s.frames + 1 }));
-      for (const text of texts) this.handleText(text);
+      for (const hit of hits) this.handleHit(hit);
       // setTimeout zamiast requestAnimationFrame: rAF zamiera w karcie w tle i przy ukrytym oknie.
       await new Promise((r) => setTimeout(r, 15));
     }
   }
 
-  private handleText(text: string): void {
-    const bytes = base64ToBytes(text);
-    const frame = bytes && decodeFrame(bytes);
+  private handleHit(hit: ScanHit): void {
+    const frame = decodeWire(hit);
     if (!frame) {
       this.stats.update((s) => ({ ...s, invalid: s.invalid + 1 }));
+      if (!hit.bytes && looksLikeBinaryFrame(hit.text) && this.engine() === 'native') {
+        this.switchToWasm();
+      }
       return;
     }
+    this.lastCodeAt.set(performance.now());
+
+    if (frame.header.flags & FLAG_CALIBRATION) {
+      this.stats.update((s) => ({ ...s, codes: s.codes + 1 }));
+      this.handleCalibration(frame.header);
+      return;
+    }
+
     const current = this.transfer();
     if (!current || !this.decoder || !sameTransfer(current, frame.header)) {
       this.beginTransfer(frame.header);
     }
     this.stats.update((s) => ({ ...s, codes: s.codes + 1 }));
-    this.lastCodeAt.set(performance.now());
     const decoder = this.decoder!;
     if (decoder.isComplete) return;
 
@@ -206,6 +275,57 @@ export class Receive implements OnInit, OnDestroy {
       this.scheduleGrid();
       if (decoder.isComplete) this.finish(frame.header, decoder);
     }
+  }
+
+  /** Silnik natywny nie oddaje bajtów; przy ramkach binarnych przełącza się na ZXing. */
+  private switchToWasm(): void {
+    this.notice.set('Nadajnik używa kodowania binarnego. Przełączam dekoder na ZXing WebAssembly.');
+    this.preferredEngine.set('wasm');
+    void this.start();
+  }
+
+  private handleCalibration(header: FrameHeader): void {
+    if (header.dataLength !== CALIBRATION_TABLE_VERSION) {
+      this.error.set('Nadajnik ma inną wersję tabeli kalibracji. Zaktualizuj aplikację po obu stronach.');
+      return;
+    }
+    const profile = CALIBRATION_PROFILES[header.fileId];
+    if (!profile || header.blockSize !== profile.blockSize) return;
+    const now = performance.now();
+    let entry = this.calibration.get(header.fileId);
+    if (!entry) {
+      entry = { seen: new Set(), firstAt: now, lastAt: now };
+      this.calibration.set(header.fileId, entry);
+    }
+    entry.seen.add(header.seed);
+    entry.lastAt = now;
+    this.calibrationCurrent.set(profileName(profile) ?? '');
+    if (!this.calibrationDirty) {
+      this.calibrationDirty = true;
+      setTimeout(() => {
+        this.calibrationDirty = false;
+        this.publishCalibration();
+      }, 200);
+    }
+  }
+
+  private publishCalibration(): void {
+    const rows: CalibrationRow[] = [];
+    for (const [index, entry] of this.calibration) {
+      const profile = CALIBRATION_PROFILES[index];
+      const sent = calibrationCodes(profile);
+      const received = Math.min(entry.seen.size, sent);
+      rows.push({
+        index,
+        name: profileName(profile) ?? `#${index}`,
+        profile,
+        received,
+        sent,
+        bytesPerSecond: (received * profile.blockSize) / (CALIBRATION_MS / 1000),
+      });
+    }
+    rows.sort((a, b) => b.bytesPerSecond - a.bytesPerSecond || a.index - b.index);
+    this.calibrationRows.set(rows);
   }
 
   private beginTransfer(header: FrameHeader): void {

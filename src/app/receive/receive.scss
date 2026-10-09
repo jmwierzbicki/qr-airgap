@@ -114,3 +114,41 @@
   white-space: pre-wrap;
   word-break: break-word;
 }
+
+.notice {
+  color: #1d4ed8;
+}
+
+.calibration {
+  width: 100%;
+  margin-top: 1rem;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+  font-variant-numeric: tabular-nums;
+
+  th,
+  td {
+    padding: 0.35rem 0.5rem;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+  }
+
+  th {
+    color: var(--muted);
+    font-weight: 600;
+  }
+
+  tr.best td {
+    background: #f0fdf4;
+    font-weight: 600;
+  }
+
+  .link {
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--accent);
+    font-weight: 600;
+    text-decoration: underline;
+  }
+}

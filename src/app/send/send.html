@@ -39,19 +39,55 @@
 </section>
 
 <section class="panel">
-  <h2>2. Parametry</h2>
+  <h2>2. Profil transmisji</h2>
+
+  <div class="profile-row">
+    <label class="field grow">
+      <span>Nazwa profilu z kalibracji (np. {{ profileNames[13] }})</span>
+      <input
+        type="text"
+        list="profile-names"
+        placeholder="Przymiotnik Zwierzę"
+        [value]="profileInput()"
+        (input)="onProfileInput($event)"
+        (keydown.enter)="applyProfileName()"
+      />
+      <datalist id="profile-names">
+        @for (name of profileNames; track name) {
+          <option [value]="name"></option>
+        }
+      </datalist>
+    </label>
+    <button type="button" (click)="applyProfileName()">Zastosuj</button>
+  </div>
+
   <div class="controls">
     <label class="field">
       <span>Bajtów na kod</span>
       <select [value]="blockSize()" (change)="onBlockSize($event)">
-        @for (preset of blockPresets; track preset.value) {
-          <option [value]="preset.value" [selected]="preset.value === blockSize()">{{ preset.label }}</option>
+        @for (size of blockPresets; track size) {
+          <option [value]="size" [selected]="size === blockSize()">{{ size }} B</option>
         }
       </select>
     </label>
     <label class="field">
-      <span>Kodów na sekundę: {{ fps() }}</span>
+      <span>Klatek na sekundę: {{ fps() }}</span>
       <input type="range" min="2" max="20" step="1" [value]="fps()" (input)="onFps($event)" />
+    </label>
+    <label class="field">
+      <span>Kodów na klatkę</span>
+      <select [value]="grid()" (change)="onGrid($event)">
+        <option value="1" [selected]="grid() === 1">1</option>
+        <option value="2" [selected]="grid() === 2">2 (obok siebie)</option>
+        <option value="4" [selected]="grid() === 4">4 (siatka 2×2)</option>
+      </select>
+    </label>
+    <label class="field">
+      <span>Kodowanie</span>
+      <select [value]="binary() ? 'binary' : 'base64'" (change)="onBinary($event)">
+        <option value="base64" [selected]="!binary()">base64 (każdy skaner)</option>
+        <option value="binary" [selected]="binary()">binarne, +33% (tylko ZXing)</option>
+      </select>
     </label>
     <label class="field">
       <span>Korekcja błędów QR</span>
@@ -62,14 +98,19 @@
       </select>
     </label>
   </div>
+
   <p class="hint">
-    Przepustowość nominalna: <strong>{{ formatBytes(throughput()) }}/s</strong>.
+    Profil:
+    <strong>{{ currentProfileName() ?? 'własny (bez nazwy)' }}</strong>.
+    Przepustowość nominalna <strong>{{ formatBytes(throughput()) }}/s</strong>
+    ({{ codesPerSecond() }} kodów/s).
     @if (blockCount()) {
-      Pełny cykl {{ blockCount() }} kodów to ok. <strong>{{ cycleSeconds() | number: '1.0-0' }} s</strong>;
-      przy stratach odbiornik dobiera brakujące bloki z kolejnych kodów (kod fontannowy),
-      więc nie trzeba niczego powtarzać ręcznie.
+      Pełny cykl {{ blockCount() }} kodów to ok. <strong>{{ cycleSeconds() | number: '1.0-1' }} s</strong>.
     }
   </p>
+  @if (notice()) {
+    <p class="hint notice">{{ notice() }}</p>
+  }
 </section>
 
 <section class="panel stage-panel">
@@ -77,14 +118,23 @@
   <div class="row">
     @if (!running()) {
       <button type="button" class="primary" [disabled]="!payload()" (click)="start()">Start</button>
+      <button type="button" (click)="startCalibration()" title="Przelatuje po {{ profileNames.length }} profilach, ok. {{ calibrationTotalSeconds }} s">
+        Kalibracja ({{ calibrationTotalSeconds }} s)
+      </button>
     } @else {
       <button type="button" class="danger" (click)="stop()">Stop</button>
     }
     <button type="button" [disabled]="!running()" (click)="toggleFullscreen()">Pełny ekran</button>
-    @if (running()) {
+    @if (running() && !calibrating()) {
       <span class="status">
         QR v{{ qrVersion() }} ({{ qrModules() }}×{{ qrModules() }}), ramka {{ frameBytes() }} B,
         wysłano {{ framesSent() }} kodów
+      </span>
+    }
+    @if (calibrating()) {
+      <span class="status">
+        Kalibracja {{ calibrationIndex() + 1 }}/{{ profileNames.length }}:
+        <strong>{{ calibrationProfileName() }}</strong> (QR v{{ qrVersion() }})
       </span>
     }
   </div>
@@ -96,13 +146,16 @@
   <div class="stage" #stage [class.active]="running()">
     <canvas #canvas></canvas>
     @if (!running()) {
-      <p class="placeholder">Tu pojawi się strumień kodów. Ustaw odbiornik tak, żeby kod wypełniał kadr.</p>
+      <p class="placeholder">
+        Tu pojawi się strumień kodów. Ustaw odbiornik tak, żeby kody wypełniały kadr.
+        „Kalibracja” nadaje po kolei wszystkie profile; odbiornik pokaże ranking z nazwami.
+      </p>
     }
   </div>
 
   @if (running()) {
-    <div class="progress" title="Postęp pierwszego (systematycznego) cyklu">
-      <div class="bar" [style.width.%]="cycleProgress()"></div>
+    <div class="progress" [title]="calibrating() ? 'Postęp kalibracji' : 'Postęp pierwszego (systematycznego) cyklu'">
+      <div class="bar" [style.width.%]="calibrating() ? calibrationProgress() : cycleProgress()"></div>
     </div>
   }
 </section>

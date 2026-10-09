@@ -1,0 +1,35 @@
+/**
+ * Warstwa "na drucie": jak ramka trafia do kodu QR i jak wraca ze skanera.
+ *
+ * - base64: ramka jako tekst ASCII w trybie bajtowym QR. Działa z każdym
+ *   skanerem (BarcodeDetector zwraca tylko tekst), kosztuje 25% pojemności.
+ * - binary: surowe bajty ramki w trybie bajtowym QR. Wymaga skanera, który
+ *   oddaje bajty (zxing-wasm); +33% danych w tym samym kodzie.
+ */
+
+import { base64ToBytes, bytesToBase64, utf8Encode } from './bytes';
+import { decodeFrame, encodeFrame, type Frame } from './frame';
+
+export interface ScanHit {
+  text: string;
+  bytes?: Uint8Array;
+}
+
+export function encodeWire(frame: Frame, binary: boolean): Uint8Array {
+  const raw = encodeFrame(frame);
+  return binary ? raw : utf8Encode(bytesToBase64(raw));
+}
+
+/** Surowa ramka zaczyna się od ASCII "FQ"; base64 takiej ramki zaczyna się od "RlE". */
+export function looksLikeBinaryFrame(text: string): boolean {
+  return text.length > 2 && text.charCodeAt(0) === 0x46 && text.charCodeAt(1) === 0x51;
+}
+
+export function decodeWire(hit: ScanHit): Frame | null {
+  if (hit.bytes && hit.bytes.length > 2 && hit.bytes[0] === 0x46 && hit.bytes[1] === 0x51) {
+    const frame = decodeFrame(hit.bytes);
+    if (frame) return frame;
+  }
+  const bytes = base64ToBytes(hit.text.trim());
+  return bytes ? decodeFrame(bytes) : null;
+}

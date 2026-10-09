@@ -13,11 +13,19 @@
       </select>
     </label>
     <label class="field">
+      <span>Rozdzielczość</span>
+      <select [value]="resolution()" (change)="onResolution($event)">
+        @for (res of resolutions; track res.width) {
+          <option [value]="res.width" [selected]="res.width === resolution()">{{ res.label }}</option>
+        }
+      </select>
+    </label>
+    <label class="field">
       <span>Silnik dekodera</span>
       <select [value]="preferredEngine()" (change)="onEngine($event)">
         <option value="auto" [selected]="preferredEngine() === 'auto'">Automatycznie</option>
-        <option value="native" [selected]="preferredEngine() === 'native'">Natywny (BarcodeDetector)</option>
-        <option value="wasm" [selected]="preferredEngine() === 'wasm'">ZXing WebAssembly</option>
+        <option value="native" [selected]="preferredEngine() === 'native'">Natywny (BarcodeDetector, tylko base64)</option>
+        <option value="wasm" [selected]="preferredEngine() === 'wasm'">ZXing WebAssembly (base64 i binarne)</option>
       </select>
     </label>
     <div class="row buttons">
@@ -35,6 +43,9 @@
   @if (error()) {
     <p class="error">{{ error() }}</p>
   }
+  @if (notice()) {
+    <p class="hint notice">{{ notice() }}</p>
+  }
 
   <div class="viewfinder" [class.hit]="lastCodeAt() > 0 && running()">
     <video #video playsinline muted autoplay></video>
@@ -46,6 +57,52 @@
     }
   </div>
 </section>
+
+@if (calibrationRows().length) {
+  <section class="panel">
+    <h2>Kalibracja</h2>
+    @if (calibrationCurrent()) {
+      <p class="hint">Odbieram profil: <strong>{{ calibrationCurrent() }}</strong>. Ranking aktualizuje się na bieżąco.</p>
+    }
+    @if (bestCalibration(); as best) {
+      <div class="result">
+        <h3>Najlepszy: {{ best.name }}</h3>
+        <p>
+          {{ formatBytes(best.bytesPerSecond) }}/s · {{ best.profile.blockSize }} B × {{ best.profile.grid }} kod(y) ×
+          {{ best.profile.fps }} kl/s · {{ best.profile.binary ? 'binarny' : 'base64' }} · odebrano
+          {{ best.received }}/{{ best.sent }}
+        </p>
+        <button type="button" class="primary" (click)="copyName(best.name)">Kopiuj nazwę profilu</button>
+      </div>
+    }
+    <table class="calibration">
+      <thead>
+        <tr>
+          <th>Profil</th>
+          <th>B/kod</th>
+          <th>kl/s</th>
+          <th>kodów</th>
+          <th>kodowanie</th>
+          <th>odebrano</th>
+          <th>przepustowość</th>
+        </tr>
+      </thead>
+      <tbody>
+        @for (row of calibrationRows(); track row.index) {
+          <tr [class.best]="$first">
+            <td><button type="button" class="link" (click)="copyName(row.name)">{{ row.name }}</button></td>
+            <td>{{ row.profile.blockSize }}</td>
+            <td>{{ row.profile.fps }}</td>
+            <td>{{ row.profile.grid }}</td>
+            <td>{{ row.profile.binary ? 'bin' : 'b64' }}</td>
+            <td>{{ row.received }}/{{ row.sent }} ({{ (row.received / row.sent) * 100 | number: '1.0-0' }}%)</td>
+            <td>{{ formatBytes(row.bytesPerSecond) }}/s</td>
+          </tr>
+        }
+      </tbody>
+    </table>
+  </section>
+}
 
 <section class="panel">
   <h2>Odbiór</h2>
@@ -75,8 +132,9 @@
     </dl>
   } @else {
     <p class="hint">
-      Skieruj kamerę na ekran nadajnika. Kod powinien wypełniać możliwie dużą część kadru i być ostry.
+      Skieruj kamerę na ekran nadajnika. Kody powinny wypełniać możliwie dużą część kadru i być ostre.
       Odbiór zaczyna się automatycznie po rozpoznaniu pierwszego kodu, kolejność nie ma znaczenia.
+      Jeśli nadajnik uruchomi kalibrację, pojawi się tu ranking profili.
     </p>
   }
 

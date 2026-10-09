@@ -2,7 +2,8 @@
 /**
  * Web Worker dekodujący kody QR przez zxing-wasm (ZXing-C++ skompilowany do
  * WebAssembly). Plik .wasm jest serwowany lokalnie z katalogu `zxing/`, więc
- * aplikacja działa bez dostępu do sieci.
+ * aplikacja działa bez dostępu do sieci. Zwraca tekst i surowe bajty, więc
+ * obsługuje zarówno ramki base64, jak i binarne; dekoduje do 8 kodów na klatkę.
  */
 
 import { prepareZXingModule, readBarcodes, type ReaderOptions } from 'zxing-wasm/reader';
@@ -22,10 +23,15 @@ export interface ScanWorkerFrame {
 
 export type ScanWorkerRequest = ScanWorkerInit | ScanWorkerFrame;
 
+export interface ScanWorkerHit {
+  text: string;
+  bytes: Uint8Array;
+}
+
 export interface ScanWorkerResult {
   type: 'ready' | 'result' | 'error';
   id?: number;
-  texts?: string[];
+  hits?: ScanWorkerHit[];
   message?: string;
 }
 
@@ -35,14 +41,14 @@ const readerOptions: ReaderOptions = {
   tryRotate: false,
   tryInvert: false,
   tryDownscale: true,
-  maxNumberOfSymbols: 1,
+  maxNumberOfSymbols: 8,
   textMode: 'Plain',
 };
 
 let ready: Promise<unknown> | null = null;
 
-function reply(message: ScanWorkerResult): void {
-  postMessage(message);
+function reply(message: ScanWorkerResult, transfer: Transferable[] = []): void {
+  postMessage(message, transfer);
 }
 
 addEventListener('message', async (event: MessageEvent<ScanWorkerRequest>) => {
@@ -69,13 +75,15 @@ addEventListener('message', async (event: MessageEvent<ScanWorkerRequest>) => {
       await ready;
       const image = new ImageData(new Uint8ClampedArray(request.buffer), request.width, request.height);
       const results = await readBarcodes(image, readerOptions);
-      reply({
-        type: 'result',
-        id: request.id,
-        texts: results.filter((r) => r.isValid).map((r) => r.text),
-      });
+      const hits: ScanWorkerHit[] = results
+        .filter((r) => r.isValid)
+        .map((r) => ({ text: r.text, bytes: r.bytes.slice() }));
+      reply(
+        { type: 'result', id: request.id, hits },
+        hits.map((h) => h.bytes.buffer as ArrayBuffer),
+      );
     } catch (err) {
-      reply({ type: 'result', id: request.id, texts: [], message: String(err) });
+      reply({ type: 'result', id: request.id, hits: [], message: String(err) });
     }
   }
 });

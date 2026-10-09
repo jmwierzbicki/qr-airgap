@@ -1,13 +1,13 @@
 /**
  * Abstrakcja nad dwoma silnikami skanowania:
  *  - `native`: BarcodeDetector API (Chrome na Androidzie/macOS/ChromeOS, Safari 17+),
- *    sprzętowo przyspieszane, najszybsze, zero pobierania;
- *  - `wasm`: zxing-wasm w Web Workerze (Windows/Linux Chrome, Firefox).
- *
- * Ramki niosą wyłącznie base64 (ASCII), bo BarcodeDetector zwraca tylko tekst
- * i przy surowych bajtach zgadywałby kodowanie znaków.
+ *    sprzętowo przyspieszane, najszybsze, zero pobierania; zwraca tylko tekst,
+ *    więc obsługuje wyłącznie ramki base64;
+ *  - `wasm`: zxing-wasm w Web Workerze (Windows/Linux Chrome, Firefox); zwraca
+ *    też surowe bajty, więc obsługuje ramki binarne.
  */
 
+import type { ScanHit } from '../core/wire';
 import type { ScanWorkerRequest, ScanWorkerResult } from './scan.worker';
 
 export type ScanEngine = 'native' | 'wasm';
@@ -28,7 +28,8 @@ interface BarcodeDetectorCtor {
 
 export interface QrScanner {
   readonly engine: ScanEngine;
-  scan(video: HTMLVideoElement): Promise<string[]>;
+  readonly supportsBinary: boolean;
+  scan(video: HTMLVideoElement): Promise<ScanHit[]>;
   destroy(): void;
 }
 
@@ -46,12 +47,13 @@ async function nativeDetector(): Promise<BarcodeDetectorLike | null> {
 
 class NativeScanner implements QrScanner {
   readonly engine: ScanEngine = 'native';
+  readonly supportsBinary = false;
   constructor(private readonly detector: BarcodeDetectorLike) {}
 
-  async scan(video: HTMLVideoElement): Promise<string[]> {
+  async scan(video: HTMLVideoElement): Promise<ScanHit[]> {
     if (video.readyState < 2) return [];
     const found = await this.detector.detect(video);
-    return found.map((b) => b.rawValue);
+    return found.map((b) => ({ text: b.rawValue }));
   }
 
   destroy(): void {}
@@ -59,13 +61,17 @@ class NativeScanner implements QrScanner {
 
 class WasmScanner implements QrScanner {
   readonly engine: ScanEngine = 'wasm';
+  readonly supportsBinary = true;
   private readonly worker: Worker;
   private readonly canvas = document.createElement('canvas');
   private readonly ctx: CanvasRenderingContext2D;
   private nextId = 1;
-  private readonly waiting = new Map<number, (texts: string[]) => void>();
+  private readonly waiting = new Map<number, (hits: ScanHit[]) => void>();
 
-  private constructor(worker: Worker) {
+  private constructor(
+    worker: Worker,
+    private readonly maxWidth: number,
+  ) {
     this.worker = worker;
     this.ctx = this.canvas.getContext('2d', { willReadFrequently: true })!;
     this.worker.addEventListener('message', (event: MessageEvent<ScanWorkerResult>) => {
@@ -73,18 +79,18 @@ class WasmScanner implements QrScanner {
       if (msg.type === 'result' && msg.id !== undefined) {
         const resolve = this.waiting.get(msg.id);
         this.waiting.delete(msg.id);
-        resolve?.(msg.texts ?? []);
+        resolve?.(msg.hits ?? []);
       }
     });
   }
 
-  static create(baseUrl: string): Promise<WasmScanner> {
+  static create(baseUrl: string, maxWidth: number): Promise<WasmScanner> {
     return new Promise((resolve, reject) => {
       const worker = new Worker(new URL('./scan.worker', import.meta.url), { type: 'module' });
       const onMessage = (event: MessageEvent<ScanWorkerResult>) => {
         if (event.data.type === 'ready') {
           worker.removeEventListener('message', onMessage);
-          resolve(new WasmScanner(worker));
+          resolve(new WasmScanner(worker, maxWidth));
         } else if (event.data.type === 'error') {
           worker.removeEventListener('message', onMessage);
           worker.terminate();
@@ -98,10 +104,9 @@ class WasmScanner implements QrScanner {
     });
   }
 
-  scan(video: HTMLVideoElement): Promise<string[]> {
+  scan(video: HTMLVideoElement): Promise<ScanHit[]> {
     if (video.readyState < 2 || !video.videoWidth) return Promise.resolve([]);
-    const maxWidth = 1920;
-    const ratio = Math.min(1, maxWidth / video.videoWidth);
+    const ratio = Math.min(1, this.maxWidth / video.videoWidth);
     const width = Math.round(video.videoWidth * ratio);
     const height = Math.round(video.videoHeight * ratio);
     if (this.canvas.width !== width || this.canvas.height !== height) {
@@ -130,10 +135,16 @@ class WasmScanner implements QrScanner {
   }
 }
 
-export async function createQrScanner(baseUrl: string, prefer?: ScanEngine): Promise<QrScanner> {
-  if (prefer !== 'wasm') {
+export interface ScannerOptions {
+  prefer?: ScanEngine;
+  /** Maksymalna szerokość klatki przekazywanej do dekodera wasm. */
+  maxWidth?: number;
+}
+
+export async function createQrScanner(baseUrl: string, options: ScannerOptions = {}): Promise<QrScanner> {
+  if (options.prefer !== 'wasm') {
     const detector = await nativeDetector();
     if (detector) return new NativeScanner(detector);
   }
-  return WasmScanner.create(baseUrl);
+  return WasmScanner.create(baseUrl, options.maxWidth ?? 1920);
 }

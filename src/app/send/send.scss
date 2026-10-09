@@ -89,3 +89,19 @@
     transition: width 0.2s linear;
   }
 }
+
+.profile-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+
+  .grow {
+    flex: 1 1 240px;
+  }
+}
+
+.notice {
+  color: #1d4ed8;
+}
